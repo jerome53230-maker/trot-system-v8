@@ -1,0 +1,22 @@
+# ============================================================================
+# TROT SYSTEM v8.0 - REQUIREMENTS
+# ============================================================================
+# Date: Décembre 2025
+# Python: 3.11.6
+
+# Framework Web
+Flask==3.0.0
+flask-cors==4.0.0
+gunicorn==21.2.0
+
+# HTTP Requests
+requests==2.31.0
+
+# Google Generative AI (NOUVEAU v8.0)
+google-generativeai==0.3.2
+
+# Retry Logic (NOUVEAU v8.0)
+tenacity==8.2.3
+
+# Utils
+python-dateutil==2.8.2
