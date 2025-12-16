@@ -3249,3 +3249,120 @@ def test_pmu():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+# ============================================================================
+# DEBUG ENDPOINT - DIAGNOSTIC GEMINI v8.0
+# ============================================================================
+
+@app.route('/debug-gemini', methods=['GET'])
+def debug_gemini():
+    """Endpoint debug pour diagnostiquer problème Gemini."""
+    import traceback
+    
+    debug_info = {
+        "timestamp": datetime.now().isoformat(),
+        "tests": {}
+    }
+    
+    # Test 1 : Variable environnement
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        debug_info["tests"]["1_env_var"] = {
+            "present": api_key is not None,
+            "length": len(api_key) if api_key else 0,
+            "prefix": api_key[:10] + "..." if api_key and len(api_key) > 10 else str(api_key),
+            "status": "✅ OK" if api_key else "❌ MANQUANTE"
+        }
+    except Exception as e:
+        debug_info["tests"]["1_env_var"] = {
+            "status": "❌ ERROR",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+    
+    # Test 2 : Import module
+    try:
+        import google.generativeai as genai
+        debug_info["tests"]["2_import"] = {
+            "status": "✅ OK",
+            "module": str(genai)
+        }
+    except Exception as e:
+        debug_info["tests"]["2_import"] = {
+            "status": "❌ ERROR",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
+        return jsonify(debug_info), 500
+    
+    # Test 3 : Configuration
+    try:
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY manquante dans os.environ")
+        
+        genai.configure(api_key=api_key)
+        debug_info["tests"]["3_configure"] = {
+            "status": "✅ OK"
+        }
+    except Exception as e:
+        debug_info["tests"]["3_configure"] = {
+            "status": "❌ ERROR",
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }
+        return jsonify(debug_info), 500
+    
+    # Test 4 : Création modèle
+    try:
+        from google.generativeai.types import HarmCategory, HarmBlockThreshold
+        
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            generation_config={
+                "temperature": 0.4,
+                "response_mime_type": "application/json"
+            },
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            }
+        )
+        debug_info["tests"]["4_model"] = {
+            "status": "✅ OK"
+        }
+    except Exception as e:
+        debug_info["tests"]["4_model"] = {
+            "status": "❌ ERROR",
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }
+        return jsonify(debug_info), 500
+    
+    # Test 5 : Appel API réel
+    try:
+        prompt_test = 'Réponds uniquement avec ce JSON exact: {"status": "OK", "test": "reussi"}'
+        response = model.generate_content(prompt_test)
+        
+        debug_info["tests"]["5_api_call"] = {
+            "status": "✅ OK",
+            "response_text": response.text[:200],
+            "response_length": len(response.text)
+        }
+    except Exception as e:
+        debug_info["tests"]["5_api_call"] = {
+            "status": "❌ ERROR",
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
+        }
+        return jsonify(debug_info), 500
+    
+    # Succès total
+    debug_info["final_status"] = "✅ TOUS LES TESTS RÉUSSIS - GEMINI FONCTIONNE PARFAITEMENT"
+    debug_info["conclusion"] = "Si ce endpoint fonctionne mais /race échoue, le problème est dans la logique process_race()"
+    
+    return jsonify(debug_info)
