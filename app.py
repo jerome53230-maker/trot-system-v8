@@ -7,7 +7,7 @@ from flask_cors import CORS
 import os
 import json
 from datetime import datetime, date
-from typing import Optional
+from typing import Optional, List, Dict
 import logging
 
 # Imports modules internes
