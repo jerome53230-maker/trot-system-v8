@@ -1,0 +1,438 @@
+# ============================================================================
+# TROT SYSTEM v8.0 - API FLASK PRINCIPALE
+# ============================================================================
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import os
+import json
+from datetime import datetime, date
+from typing import Optional
+import logging
+
+# Imports modules internes
+from core.scraper import PMUScraper
+from core.scoring_engine import ScoringEngine
+from core.value_bet_detector import ValueBetDetector
+from ai.gemini_client import GeminiClient
+from ai.prompt_builder import PromptBuilder
+from ai.response_validator import ResponseValidator
+from models.bet import RaceAnalysis, Debrief
+from utils.logger import setup_logger
+
+# Configuration
+app = Flask(__name__)
+CORS(app)
+
+# Logger
+logger = setup_logger("trot-system", level=os.getenv("LOG_LEVEL", "INFO"))
+
+# Initialisation composants
+try:
+    scraper = PMUScraper()
+    scoring_engine = ScoringEngine()
+    value_detector = ValueBetDetector()
+    gemini_client = GeminiClient()
+    prompt_builder = PromptBuilder()
+    response_validator = ResponseValidator()
+    
+    logger.info("✓ Tous les composants initialisés")
+except Exception as e:
+    logger.error(f"❌ Erreur initialisation: {e}")
+    raise
+
+# Historique (stockage simple en mémoire, remplacer par DB si besoin)
+history_store = []
+
+# ============================================================================
+# ENDPOINTS API
+# ============================================================================
+
+@app.route('/')
+def home():
+    """Page d'accueil avec documentation API."""
+    return jsonify({
+        "name": "Trot System v8.0",
+        "version": "8.0.0",
+        "description": "Système d'analyse de courses hippiques avec IA Gemini",
+        "endpoints": {
+            "/race": "GET ?date=DDMMYYYY&r=1&c=4&budget=20 - Analyse course",
+            "/debrief": "GET ?date=DDMMYYYY&r=1&c=4 - Débriefing post-course",
+            "/history": "GET - Historique analyses",
+            "/health": "GET - Health check"
+        }
+    })
+
+
+@app.route('/health')
+def health():
+    """Health check."""
+    try:
+        # Test connexion Gemini
+        gemini_ok = gemini_client.test_connection()
+        
+        return jsonify({
+            "status": "healthy" if gemini_ok else "degraded",
+            "gemini_api": "ok" if gemini_ok else "error",
+            "timestamp": datetime.now().isoformat()
+        }), 200 if gemini_ok else 503
+    
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e)
+        }), 503
+
+
+@app.route('/race', methods=['GET'])
+def analyze_race():
+    """
+    Analyse une course et génère recommandations paris.
+    
+    Query params:
+        date: DDMMYYYY (ex: 15122025)
+        r: Numéro réunion (1-9)
+        c: Numéro course (1-16)
+        budget: Budget en euros (5|10|15|20, défaut=20)
+    
+    Returns:
+        JSON avec analyse complète
+    """
+    try:
+        # Extraction paramètres
+        date_str = request.args.get('date')
+        reunion = request.args.get('r', type=int)
+        course = request.args.get('c', type=int)
+        budget = request.args.get('budget', default=20, type=int)
+        
+        # Validation
+        if not date_str or not reunion or not course:
+            return jsonify({
+                "error": "Paramètres manquants",
+                "usage": "/race?date=15122025&r=1&c=4&budget=20"
+            }), 400
+        
+        if budget not in [5, 10, 15, 20]:
+            return jsonify({
+                "error": "Budget invalide (5|10|15|20)"
+            }), 400
+        
+        logger.info(f"📊 Analyse course: {date_str} R{reunion}C{course} (Budget: {budget}€)")
+        
+        # === PHASE 1: PYTHON CALCULS ===
+        
+        # 1. Scraping données PMU
+        logger.info("1️⃣ Scraping PMU...")
+        race = scraper.get_race_data(date_str, reunion, course)
+        
+        if not race:
+            return jsonify({
+                "error": "Course introuvable ou données indisponibles"
+            }), 404
+        
+        # 2. Scoring chevaux
+        logger.info("2️⃣ Scoring chevaux...")
+        race = scoring_engine.score_race(race)
+        
+        # 3. Détection Value Bets
+        logger.info("3️⃣ Détection Value Bets...")
+        race = value_detector.detect_value_bets(race)
+        
+        # === PHASE 2: GEMINI DÉCISIONS ===
+        
+        # 4. Construction prompt
+        logger.info("4️⃣ Construction prompt...")
+        full_prompt = prompt_builder.build_prompt(race, budget=budget)
+        
+        # 5. Appel Gemini
+        logger.info("5️⃣ Appel Gemini API...")
+        gemini_response = gemini_client.analyze_race(full_prompt)
+        
+        if not gemini_response:
+            return jsonify({
+                "error": "Erreur appel Gemini",
+                "fallback": "Python-only analysis available"
+            }), 500
+        
+        # 6. Validation + Budget Lock
+        logger.info("6️⃣ Validation réponse...")
+        analysis = response_validator.validate_and_parse(
+            gemini_response, race, budget
+        )
+        
+        if not analysis:
+            return jsonify({
+                "error": "Validation réponse échouée"
+            }), 500
+        
+        # === PHASE 3: STOCKAGE & RÉPONSE ===
+        
+        # 7. Stockage historique
+        history_entry = {
+            "date": date_str,
+            "reunion": reunion,
+            "course": course,
+            "hippodrome": race.hippodrome,
+            "budget": budget,
+            "scenario": analysis.scenario_course,
+            "nb_paris": len(analysis.paris_recommandes),
+            "roi_attendu": analysis.roi_moyen_attendu,
+            "timestamp": datetime.now().isoformat()
+        }
+        history_store.append(history_entry)
+        
+        # Sauvegarde JSON (optionnel)
+        _save_analysis_to_file(date_str, reunion, course, analysis)
+        
+        logger.info(f"✅ Analyse terminée: {analysis.scenario_course}")
+        
+        # 8. Réponse JSON
+        return jsonify(analysis.to_dict()), 200
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur analyse: {e}", exc_info=True)
+        return jsonify({
+            "error": "Erreur serveur",
+            "detail": str(e)
+        }), 500
+
+
+@app.route('/debrief', methods=['GET'])
+def debrief_race():
+    """
+    Débriefing post-course avec résultats réels.
+    
+    Query params:
+        date: DDMMYYYY
+        r: Numéro réunion
+        c: Numéro course
+    
+    Returns:
+        JSON avec analyse performance
+    """
+    try:
+        date_str = request.args.get('date')
+        reunion = request.args.get('r', type=int)
+        course = request.args.get('c', type=int)
+        
+        if not date_str or not reunion or not course:
+            return jsonify({
+                "error": "Paramètres manquants"
+            }), 400
+        
+        logger.info(f"📋 Débriefing: {date_str} R{reunion}C{course}")
+        
+        # Récupération résultats réels
+        results = scraper.get_race_results(date_str, reunion, course)
+        
+        if not results:
+            return jsonify({
+                "error": "Résultats non disponibles (course non terminée ?)"
+            }), 404
+        
+        # Chargement analyse initiale (depuis historique ou fichier)
+        analysis = _load_analysis_from_file(date_str, reunion, course)
+        
+        if not analysis:
+            return jsonify({
+                "error": "Analyse initiale introuvable",
+                "info": "Analysez d'abord la course via /race"
+            }), 404
+        
+        # Calcul performance
+        debrief = _calculate_debrief(analysis, results, date_str, reunion, course)
+        
+        logger.info(f"✅ Débriefing terminé: ROI réel {debrief.roi_reel}x")
+        
+        return jsonify(debrief.to_dict()), 200
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur débriefing: {e}")
+        return jsonify({
+            "error": "Erreur serveur",
+            "detail": str(e)
+        }), 500
+
+
+@app.route('/history', methods=['GET'])
+def get_history():
+    """
+    Retourne l'historique des courses analysées.
+    
+    Query params:
+        limit: Nombre max résultats (défaut=50)
+    
+    Returns:
+        JSON avec liste historique
+    """
+    try:
+        limit = request.args.get('limit', default=50, type=int)
+        
+        # Tri par date décroissante
+        sorted_history = sorted(
+            history_store,
+            key=lambda x: x['timestamp'],
+            reverse=True
+        )
+        
+        return jsonify({
+            "total": len(sorted_history),
+            "history": sorted_history[:limit]
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur historique: {e}")
+        return jsonify({
+            "error": "Erreur serveur"
+        }), 500
+
+
+# ============================================================================
+# FONCTIONS UTILITAIRES
+# ============================================================================
+
+def _save_analysis_to_file(date_str: str, reunion: int, course: int,
+                           analysis: RaceAnalysis):
+    """Sauvegarde l'analyse dans un fichier JSON."""
+    try:
+        # Création dossier data/history si besoin
+        history_dir = os.path.join(
+            os.path.dirname(__file__),
+            'data',
+            'history'
+        )
+        os.makedirs(history_dir, exist_ok=True)
+        
+        # Nom fichier
+        filename = f"{date_str}_R{reunion}C{course}_analysis.json"
+        filepath = os.path.join(history_dir, filename)
+        
+        # Sauvegarde
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(analysis.to_dict(), f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"💾 Analyse sauvegardée: {filename}")
+    
+    except Exception as e:
+        logger.warning(f"Erreur sauvegarde analyse: {e}")
+
+
+def _load_analysis_from_file(date_str: str, reunion: int,
+                             course: int) -> Optional[dict]:
+    """Charge une analyse depuis un fichier JSON."""
+    try:
+        filename = f"{date_str}_R{reunion}C{course}_analysis.json"
+        filepath = os.path.join(
+            os.path.dirname(__file__),
+            'data',
+            'history',
+            filename
+        )
+        
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        logger.error(f"Erreur chargement analyse: {e}")
+        return None
+
+
+def _calculate_debrief(analysis: dict, results: dict, date_str: str,
+                      reunion: int, course: int) -> Debrief:
+    """Calcule le débriefing de performance."""
+    
+    # Extraction données
+    arrivee = results['arrivee']
+    non_partants = results['non_partants']
+    paris_joues = analysis['paris_recommandes']
+    top_5_predit = [h['numero'] for h in analysis['top_5_chevaux']]
+    
+    # Calcul précision top 3
+    top_3_predit = top_5_predit[:3]
+    top_3_reel = arrivee[:3]
+    
+    matches = sum(1 for num in top_3_predit if num in top_3_reel)
+    precision_top_3 = (matches / 3) * 100
+    
+    # Calcul gains (simplifié - à améliorer avec vrais rapports PMU)
+    gains_total = 0.0
+    mise_totale = sum(p['mise'] for p in paris_joues)
+    paris_gagnants = []
+    
+    # Vérification paris gagnants (logique simplifiée)
+    for pari in paris_joues:
+        if _is_bet_winning(pari, arrivee):
+            # Estimation gain (rapports PMU réels à intégrer)
+            gains_total += pari['mise'] * pari['roi_attendu']
+            paris_gagnants.append(pari['type'])
+    
+    roi_reel = gains_total / mise_totale if mise_totale > 0 else 0.0
+    
+    # Commentaire
+    if precision_top_3 >= 66:
+        commentaire = "Excellent pronostic ! Top 3 bien anticipé."
+    elif precision_top_3 >= 33:
+        commentaire = "Pronostic correct, quelques chevaux placés."
+    else:
+        commentaire = "Pronostic difficile, arrivée surprenante."
+    
+    debrief = Debrief(
+        date=date_str,
+        reunion=reunion,
+        course=course,
+        hippodrome=analysis.get('hippodrome', 'INCONNU'),
+        arrivee=arrivee,
+        non_partants=non_partants,
+        paris_joues=[],  # Simplification
+        paris_gagnants=paris_gagnants,
+        gains_total=gains_total,
+        mise_totale=mise_totale,
+        roi_reel=round(roi_reel, 2),
+        top_5_predit=top_5_predit,
+        top_5_reel=arrivee[:5],
+        precision_top_3=round(precision_top_3, 1),
+        commentaire=commentaire
+    )
+    
+    return debrief
+
+
+def _is_bet_winning(pari: dict, arrivee: List[int]) -> bool:
+    """Vérifie si un pari est gagnant (logique simplifiée)."""
+    chevaux = pari['chevaux']
+    type_pari = pari['type']
+    
+    if type_pari == 'SIMPLE_GAGNANT':
+        return chevaux[0] == arrivee[0]
+    
+    elif type_pari == 'SIMPLE_PLACE':
+        return chevaux[0] in arrivee[:3]
+    
+    elif type_pari == 'COUPLE_GAGNANT':
+        return chevaux[0] == arrivee[0] and chevaux[1] == arrivee[1]
+    
+    elif type_pari == 'COUPLE_PLACE':
+        return chevaux[0] in arrivee[:3] and chevaux[1] in arrivee[:3]
+    
+    elif type_pari == 'TRIO':
+        return all(c in arrivee[:3] for c in chevaux)
+    
+    elif type_pari in ['MULTI_EN_4', 'MULTI_EN_5']:
+        # Au moins 2 chevaux dans top 4
+        return sum(1 for c in chevaux if c in arrivee[:4]) >= 2
+    
+    elif type_pari == 'DEUX_SUR_QUATRE':
+        return sum(1 for c in chevaux if c in arrivee[:4]) >= 2
+    
+    return False
+
+
+# ============================================================================
+# DÉMARRAGE SERVEUR
+# ============================================================================
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
