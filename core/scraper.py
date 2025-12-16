@@ -34,24 +34,28 @@ class PMUScraper:
             Objet Race complet ou None si erreur
         """
         try:
-            # Format date
+            # Format date - Garder DDMMYYYY tel quel (ex: 16122025)
             race_date = datetime.strptime(date_str, "%d%m%Y").date()
-            date_formatted = race_date.strftime("%Y-%m-%d")
             
-            # Récupération données réunion
-            reunion_url = f"{self.BASE_URL}/programme/{date_formatted}/R{reunion}"
-            logger.info(f"Récupération réunion: {reunion_url}")
+            # Récupération données course directe (format API PMU correct)
+            course_url = f"{self.BASE_URL}/programme/{date_str}/R{reunion}/C{course}"
+            logger.info(f"Récupération course: {course_url}")
             
-            reunion_data = self._fetch_json(reunion_url)
-            if not reunion_data:
-                logger.error(f"Impossible de récupérer la réunion R{reunion}")
-                return None
-            
-            # Extraction course
-            course_data = self._find_course_in_reunion(reunion_data, course)
+            course_data = self._fetch_json(course_url)
             if not course_data:
-                logger.error(f"Course C{course} introuvable dans R{reunion}")
+                logger.error(f"Impossible de récupérer la course R{reunion}C{course}")
                 return None
+            
+            # Récupérer les participants (endpoint séparé selon API PMU)
+            if 'participants' not in course_data or not course_data.get('participants'):
+                participants_url = f"{course_url}/participants"
+                logger.info(f"Récupération participants: {participants_url}")
+                participants_data = self._fetch_json(participants_url)
+                if participants_data and 'participants' in participants_data:
+                    course_data['participants'] = participants_data['participants']
+                elif participants_data:
+                    # Si participants_data est directement la liste
+                    course_data['participants'] = participants_data
             
             # Construction objet Race
             race = self._build_race_object(course_data, race_date, reunion, course)
@@ -233,10 +237,11 @@ class PMUScraper:
             Dict avec arrivée, rapports, etc.
         """
         try:
+            # Format date - Garder DDMMYYYY tel quel (ex: 16122025)
             race_date = datetime.strptime(date_str, "%d%m%Y").date()
-            date_formatted = race_date.strftime("%Y-%m-%d")
             
-            url = f"{self.BASE_URL}/programme/{date_formatted}/R{reunion}/C{course}/resultats"
+            # Récupération rapports définitifs (format API PMU correct)
+            url = f"{self.BASE_URL}/programme/{date_str}/R{reunion}/C{course}/rapports-definitifs"
             logger.info(f"Récupération résultats: {url}")
             
             data = self._fetch_json(url)
