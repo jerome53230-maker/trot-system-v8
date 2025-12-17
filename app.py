@@ -92,6 +92,10 @@ def save_history(history: List[Dict]):
 # Initialisation composants
 try:
     scraper = PMUScraper()
+    # VIDAGE FORCÉ DU CACHE AU DÉMARRAGE
+    scraper._cache.clear()
+    logger.info("✓ Cache scraper vidé au démarrage")
+    
     scoring_engine = ScoringEngine()
     value_detector = ValueBetDetector()
     gemini_client = GeminiClient()
@@ -157,6 +161,7 @@ def health():
             "status": "healthy" if gemini_ok else "degraded",
             "gemini_api": "ok" if gemini_ok else "error",
             "historique_entries": len(history_store),
+            "cache_size": len(scraper._cache),
             "cache_enabled": True,
             "timestamp": datetime.now().isoformat()
         }), 200 if gemini_ok else 503
@@ -166,6 +171,27 @@ def health():
             "status": "unhealthy",
             "error": str(e)
         }), 503
+
+
+@app.route('/clear-cache', methods=['POST'])
+def clear_cache():
+    """Vide le cache du scraper (debug uniquement)."""
+    try:
+        cache_size = len(scraper._cache)
+        scraper._cache.clear()
+        logger.info(f"🗑️ Cache vidé manuellement ({cache_size} entrées)")
+        
+        return jsonify({
+            "status": "success",
+            "message": f"Cache vidé: {cache_size} entrées supprimées",
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Erreur vidage cache: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
 
 
 @app.route('/metrics')
