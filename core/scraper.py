@@ -37,6 +37,10 @@ class PMUScraper:
         Returns:
             Objet Race complet ou None si erreur
         """
+        # LOG FORCÉ IMMÉDIAT
+        print(f"🚨 SCRAPER START: {date_str} R{reunion}C{course}")
+        logger.info(f"🚨 SCRAPER get_race_data APPELÉ: {date_str} R{reunion}C{course}")
+        
         # Vérifier cache
         cache_key = f"{date_str}_R{reunion}C{course}"
         if cache_key in self._cache:
