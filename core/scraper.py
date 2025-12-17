@@ -61,13 +61,27 @@ class PMUScraper:
             # Récupérer les participants (endpoint séparé selon API PMU)
             if 'participants' not in course_data or not course_data.get('participants'):
                 participants_url = f"{course_url}/participants"
-                logger.info(f"Récupération participants: {participants_url}")
+                logger.info(f"📥 Récupération participants: {participants_url}")
                 participants_data = self._fetch_json(participants_url)
+                
+                logger.info(f"🔍 Type réponse participants: {type(participants_data)}")
+                logger.info(f"🔍 Clés réponse: {list(participants_data.keys()) if isinstance(participants_data, dict) else 'N/A'}")
+                
                 if participants_data and 'participants' in participants_data:
                     course_data['participants'] = participants_data['participants']
-                elif participants_data:
+                    logger.info(f"✓ Participants extraits de ['participants']")
+                elif participants_data and isinstance(participants_data, list):
                     # Si participants_data est directement la liste
                     course_data['participants'] = participants_data
+                    logger.info(f"✓ Participants = liste directe ({len(participants_data)} items)")
+                elif participants_data:
+                    # Sinon, utiliser tel quel
+                    course_data['participants'] = participants_data
+                    logger.info(f"✓ Participants = données brutes")
+                else:
+                    logger.warning("⚠️ Aucune donnée participants reçue")
+            else:
+                logger.info(f"✓ Participants déjà dans course_data")
             
             # Construction objet Race
             race = self._build_race_object(course_data, race_date, reunion, course)
@@ -181,19 +195,60 @@ class PMUScraper:
     def _extract_horses(self, course_data: Dict, discipline: str, hippodrome: str) -> List[Horse]:
         """Extrait la liste des chevaux participants avec validation."""
         horses = []
-        partants = course_data.get('participants', [])
         
-        for p in partants:
+        # Récupérer participants avec gestion formats multiples
+        partants_raw = course_data.get('participants', [])
+        
+        # DEBUG: Log type et structure
+        logger.info(f"🔍 Type participants: {type(partants_raw)}")
+        logger.info(f"🔍 Participants échantillon: {str(partants_raw)[:200]}...")
+        
+        # Gérer différents formats API PMU
+        partants = []
+        
+        if isinstance(partants_raw, list):
+            partants = partants_raw
+            logger.info(f"✓ Format liste directe: {len(partants)} partants")
+        elif isinstance(partants_raw, dict):
+            # Si c'est un dict, chercher la liste dedans
+            if 'participants' in partants_raw:
+                partants = partants_raw['participants']
+                logger.info(f"✓ Format dict['participants']: {len(partants)} partants")
+            elif 'participant' in partants_raw:
+                partants = partants_raw['participant']
+                logger.info(f"✓ Format dict['participant']: {len(partants)} partants")
+            else:
+                # Essayer de trouver une liste dans le dict
+                for key, value in partants_raw.items():
+                    if isinstance(value, list) and len(value) > 0:
+                        partants = value
+                        logger.info(f"✓ Participants trouvés sous clé '{key}': {len(partants)}")
+                        break
+        else:
+            logger.error(f"❌ Format participants inconnu: {type(partants_raw)}")
+            return horses
+        
+        logger.info(f"📋 Traitement de {len(partants)} partants...")
+        
+        for i, p in enumerate(partants):
             try:
+                # VÉRIFICATION TYPE CRITIQUE
+                if not isinstance(p, dict):
+                    logger.error(f"❌ Partant #{i+1} n'est PAS un dict: type={type(p)}, valeur={str(p)[:100]}")
+                    continue
+                
                 horse = self._build_horse(p, discipline, hippodrome)
                 horses.append(horse)
+                if i < 3:  # Log 3 premiers pour debug
+                    logger.info(f"  ✓ Cheval {i+1}: {horse.nom} (#{horse.numero})")
             except ValueError as e:
-                logger.warning(f"Cheval ignoré (données invalides): {e}")
+                logger.warning(f"⚠️ Cheval #{i+1} ignoré (données invalides): {e}")
                 continue
             except Exception as e:
-                logger.warning(f"Erreur extraction cheval: {e}")
+                logger.error(f"❌ Erreur extraction cheval #{i+1}: {e}")
                 continue
         
+        logger.info(f"✅ {len(horses)}/{len(partants)} chevaux extraits avec succès")
         return horses
     
     def _build_horse(self, participant: Dict, discipline: str, hippodrome: str) -> Horse:

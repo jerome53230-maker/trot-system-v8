@@ -1,5 +1,5 @@
 # ============================================================================
-# TROT SYSTEM v8.0 - CLIENT GEMINI 2.x (VERSION FINALE)
+# TROT SYSTEM v8.0 - CLIENT GEMINI (SUPPORT DUAL API KEY)
 # ============================================================================
 
 import google.generativeai as genai
@@ -13,43 +13,59 @@ from typing import Optional, Dict
 logger = logging.getLogger(__name__)
 
 class GeminiClient:
-    """Client pour l'API Google Gemini avec support Gemini 2.x."""
+    """Client pour l'API Google Gemini - Support GEMINI_API_KEY et GOOGLE_API_KEY."""
     
-    # Liste des noms de modèles à tester (MISE À JOUR décembre 2024)
     MODEL_NAMES = [
-        "gemini-flash-latest",      # Alias vers dernier Flash (2.5 ou 2.0)
-        "gemini-2.5-flash",         # Flash 2.5 (nouveau)
-        "gemini-2.0-flash",         # Flash 2.0
-        "gemini-pro-latest",        # Alias vers dernier Pro
-        "gemini-2.5-pro",           # Pro 2.5
+        "gemini-flash-latest",
+        "gemini-2.5-flash", 
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash",
+        "gemini-pro-latest",
+        "gemini-2.5-pro",
+        "gemini-pro",
     ]
     
     def __init__(self, api_key: Optional[str] = None):
         """
-        Initialise le client Gemini avec détection automatique du modèle.
+        Initialise le client Gemini.
+        Support GEMINI_API_KEY OU GOOGLE_API_KEY.
         
         Args:
-            api_key: Clé API Google (ou env var GEMINI_API_KEY)
+            api_key: Clé API Google (ou env var)
         """
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
+        # Support des deux noms de variables !
+        self.api_key = (
+            api_key or 
+            os.environ.get("GEMINI_API_KEY") or 
+            os.environ.get("GOOGLE_API_KEY")
+        )
         
         if not self.api_key:
-            raise ValueError("GEMINI_API_KEY manquante (env var ou paramètre)")
+            raise ValueError(
+                "API Key manquante ! "
+                "Définir GEMINI_API_KEY ou GOOGLE_API_KEY en variable d'environnement"
+            )
+        
+        # Log quel nom de variable est utilisé
+        if os.environ.get("GEMINI_API_KEY"):
+            logger.info("Using GEMINI_API_KEY")
+        elif os.environ.get("GOOGLE_API_KEY"):
+            logger.info("Using GOOGLE_API_KEY")
         
         # Configuration API
         genai.configure(api_key=self.api_key)
         
-        # Tentative de trouver un modèle qui fonctionne
         self.model = None
         self.model_name = None
         
-        logger.info("Recherche modèle Gemini disponible...")
+        logger.info("Initialisation Gemini client...")
         
+        # Essayer chaque modèle
         for model_name in self.MODEL_NAMES:
             try:
-                logger.info(f"Tentative modèle: {model_name}")
+                logger.info(f"Test modèle: {model_name}")
                 
-                # Créer modèle de test
                 test_model = genai.GenerativeModel(
                     model_name=model_name,
                     generation_config={
@@ -67,41 +83,39 @@ class GeminiClient:
                     }
                 )
                 
-                # Test rapide (très court pour éviter timeout)
-                response = test_model.generate_content("Test", request_options={"timeout": 10})
+                # Test direct
+                response = test_model.generate_content(
+                    '{"status": "test"}',
+                    request_options={"timeout": 15}
+                )
                 
-                # Si on arrive ici, le modèle fonctionne !
-                self.model = test_model
-                self.model_name = model_name
-                logger.info(f"✓ Modèle fonctionnel trouvé: {model_name}")
-                break
+                if response and response.text:
+                    self.model = test_model
+                    self.model_name = model_name
+                    logger.info(f"✓ Modèle fonctionnel: {model_name}")
+                    break
                 
             except Exception as e:
-                logger.warning(f"✗ Modèle {model_name} non disponible: {str(e)[:100]}")
+                error_msg = str(e)
+                logger.warning(f"✗ Modèle {model_name}: {error_msg[:100]}")
+                
+                if "API_KEY_INVALID" in error_msg or "API key not valid" in error_msg:
+                    raise ValueError(
+                        "API Key invalide ! "
+                        "Vérifiez GEMINI_API_KEY ou GOOGLE_API_KEY sur Render. "
+                        "Créez une nouvelle clé sur https://aistudio.google.com/apikey"
+                    )
+                
                 continue
         
         if not self.model:
-            # Lister modèles disponibles pour debug
-            available = self._list_available_models()
             raise ValueError(
-                f"Aucun modèle Gemini disponible ! "
+                f"Aucun modèle Gemini accessible ! "
                 f"Modèles testés: {self.MODEL_NAMES}. "
-                f"Modèles disponibles: {available[:10]}"
+                f"Vérifiez votre API Key."
             )
         
-        logger.info(f"✓ Client Gemini initialisé (modèle: {self.model_name})")
-    
-    def _list_available_models(self) -> list:
-        """Liste les modèles disponibles pour cette API key."""
-        try:
-            models = []
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    models.append(m.name)
-            return models
-        except Exception as e:
-            logger.error(f"Impossible de lister modèles: {e}")
-            return []
+        logger.info(f"✓ Client Gemini OK (modèle: {self.model_name})")
     
     @retry(
         stop=stop_after_attempt(3),
@@ -121,18 +135,15 @@ class GeminiClient:
         try:
             logger.info(f"Appel Gemini API (modèle: {self.model_name})...")
             
-            # Timeout plus long pour les requêtes réelles
             response = self.model.generate_content(
                 full_prompt,
                 request_options={"timeout": 60}
             )
             
-            # Extraction texte
             if not response or not response.text:
                 logger.error("Réponse Gemini vide")
                 return None
             
-            # Parse JSON
             try:
                 result = json.loads(response.text)
                 logger.info("✓ Réponse Gemini reçue et parsée")
@@ -144,15 +155,10 @@ class GeminiClient:
         
         except Exception as e:
             logger.error(f"Erreur appel Gemini: {e}")
-            raise  # Reraise pour retry tenacity
+            raise
     
     def test_connection(self) -> bool:
-        """
-        Test rapide de connexion à l'API.
-        
-        Returns:
-            True si connexion OK
-        """
+        """Test rapide de connexion à l'API."""
         try:
             test_prompt = "Réponds simplement 'OK' en JSON: {\"status\": \"OK\"}"
             response = self.model.generate_content(
@@ -177,46 +183,30 @@ class GeminiClient:
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("TROT SYSTEM v8.0 - TEST CLIENT GEMINI 2.x")
+    print("TROT SYSTEM v8.0 - TEST CLIENT GEMINI (DUAL API KEY SUPPORT)")
     print("=" * 70)
     
-    # Test 1: Initialisation
-    print("\n1. Test initialisation client (détection auto modèle)")
+    print("\n1. Test initialisation")
     try:
         client = GeminiClient()
-        print(f"   ✓ Client initialisé avec modèle: {client.model_name}")
+        print(f"   ✓ Client OK avec modèle: {client.model_name}")
     except ValueError as e:
         print(f"   ✗ Erreur: {e}")
         exit(1)
     
-    # Test 2: Liste modèles disponibles
-    print("\n2. Modèles disponibles:")
-    available = client._list_available_models()
-    for model in available[:10]:  # Top 10
-        print(f"   - {model}")
-    
-    # Test 3: Connexion
-    print("\n3. Test connexion API")
+    print("\n2. Test connexion API")
     if client.test_connection():
-        print("   ✓ Connexion Gemini OK")
+        print("   ✓ Connexion OK")
     else:
         print("   ✗ Connexion échouée")
     
-    # Test 4: Requête JSON
-    print("\n4. Test requête JSON")
-    simple_prompt = """Réponds en JSON avec:
-{
-    "test": "OK",
-    "message": "Gemini fonctionne",
-    "model": "Gemini 2.x"
-}"""
-    
-    result = client.analyze_race(simple_prompt)
+    print("\n3. Test requête JSON")
+    result = client.analyze_race('{"test": "OK"}')
     if result:
-        print(f"   ✓ Réponse reçue: {result}")
+        print(f"   ✓ Réponse: {result}")
     else:
         print("   ✗ Pas de réponse")
     
     print("\n" + "=" * 70)
-    print(f"SUCCESS! Modèle utilisé: {client.model_name}")
+    print(f"SUCCESS! Modèle: {client.model_name}")
     print("=" * 70)

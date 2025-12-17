@@ -231,6 +231,18 @@ def analyze_race():
                 "error": "Course introuvable ou données indisponibles"
             }), 404
         
+        # Logs détaillés des données scrapées
+        logger.info(f"✓ Scraping OK: {race.hippodrome} - {len(race.partants)} chevaux")
+        logger.info(f"   Distance: {race.distance}m - Confiance: {race.confiance_globale}/10")
+        if len(race.partants) > 0:
+            horse_sample = race.partants[0]
+            logger.info(f"   Exemple cheval: {horse_sample.nom} (#{horse_sample.numero})")
+            logger.info(f"   - Musique: {horse_sample.musique[:20] if horse_sample.musique else 'N/A'}...")
+            logger.info(f"   - Stats: {horse_sample.victoires}V/{horse_sample.courses}C")
+            logger.info(f"   - Cote: {horse_sample.cote_probable}")
+        else:
+            logger.warning("⚠️ Aucun partant trouvé !")
+        
         # 2. Scoring chevaux
         logger.info("2️⃣ Scoring chevaux...")
         race = scoring_engine.score_race(race)

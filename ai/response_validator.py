@@ -69,11 +69,16 @@ class ResponseValidator:
             # Correction automatique
             gemini_response = self._enforce_budget(gemini_response, budget, tolerance)
         
-        # 4. Kill Switch confiance faible
-        if gemini_response.get('confiance_globale', 0) < 6:
-            logger.warning("⚠️ Kill Switch: Confiance globale <6/10")
+        # 4. Kill Switch confiance faible (seuil baissé 6→4 pour moins de rejets)
+        confiance = gemini_response.get('confiance_globale', 0)
+        logger.info(f"Confiance Gemini: {confiance}/10")
+        
+        if confiance < 4:  # Seuil abaissé de 6 à 4
+            logger.warning(f"⚠️ Kill Switch: Confiance globale {confiance} < 4/10")
             return self._create_non_jouable_response(race, budget, 
                                                      "Confiance données insuffisante")
+        elif confiance < 6:
+            logger.warning(f"⚠️ Confiance faible ({confiance}/10) mais analyse acceptée")
         
         # 5. Validation paris
         if not self._validate_bets(gemini_response, race):
