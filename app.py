@@ -8,10 +8,7 @@ import os
 import json
 from datetime import datetime, date
 from typing import Optional, List, Dict
-<<<<<<< Updated upstream
-=======
 from pathlib import Path
->>>>>>> Stashed changes
 import logging
 import time
 
