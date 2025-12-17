@@ -25,18 +25,25 @@ class PromptBuilder:
         
         logger.info("✓ System prompt chargé")
     
-    def build_prompt(self, race: Race, budget: float = 20.0) -> str:
+    def build_prompt(self, race: Race, budget: float = 20.0, max_horses: int = 10) -> str:
         """
-        Construit le prompt complet XML.
+        Construit le prompt complet XML optimisé.
         
         Args:
             race: Course avec scores calculés
             budget: Budget disponible (€)
+            max_horses: Nombre max de chevaux à inclure (défaut 10)
         
         Returns:
-            Prompt XML complet
+            Prompt XML complet optimisé
         """
         logger.info(f"Construction prompt pour {race.hippodrome} R{race.reunion}C{race.course}")
+        
+        # Filtrer top N chevaux pour réduire tokens
+        horses_to_include = race.horses[:max_horses] if len(race.horses) > max_horses else race.horses
+        
+        if len(race.horses) > max_horses:
+            logger.info(f"Optimisation prompt: {max_horses}/{len(race.horses)} chevaux inclus")
         
         # Remplacement variables dans system prompt
         prompt = self.system_prompt.format(
@@ -47,7 +54,7 @@ class PromptBuilder:
             discipline=race.discipline,
             type_depart=race.type_depart,
             montantPrix=race.montant_prix,
-            nb_partants=race.nb_partants,
+            nb_partants=len(horses_to_include),  # Ajusté
             etat_piste=race.etat_piste,
             impact_piste=race.impact_piste or "Normal",
             confiance_globale=race.confiance_globale,
@@ -56,20 +63,42 @@ class PromptBuilder:
             budget=budget
         )
         
-        # Injection scores chevaux
-        horses_xml = self._build_horses_xml(race)
+        # Injection scores chevaux (optimisés)
+        horses_xml = self._build_horses_xml_optimized(horses_to_include)
         prompt = prompt.replace("<!-- HORSES_XML_PLACEHOLDER -->", horses_xml)
         
-        logger.info(f"✓ Prompt construit ({len(prompt)} caractères)")
+        # Estimation tokens
+        tokens_approx = len(prompt) // 4
+        logger.info(f"✓ Prompt construit ({len(prompt)} caractères, ~{tokens_approx} tokens)")
         
         return prompt
     
-    def _build_horses_xml(self, race: Race) -> str:
-        """Génère le XML de tous les chevaux."""
+    def _build_horses_xml_optimized(self, horses: list) -> str:
+        """
+        Génère le XML des chevaux de manière optimisée.
+        
+        Optimisations:
+        - Résume musique (5 dernières courses max)
+        - Format compact
+        """
         xml_parts = []
         
-        for horse in race.horses:
-            xml_parts.append(horse.to_xml())
+        for horse in horses:
+            # Résumer musique si trop longue
+            musique_short = horse.musique[:5] if len(horse.musique) > 5 else horse.musique
+            
+            # XML compact (une seule ligne par cheval)
+            xml = (
+                f'<horse num="{horse.numero}" nom="{horse.nom}" '
+                f'score="{horse.score_total}" cote="{horse.cote}" '
+                f'driver="{horse.driver}" entraineur="{horse.entraineur}" '
+                f'musique="{musique_short}" '
+                f'courses="{horse.nb_courses}" victoires="{horse.nb_victoires}" '
+                f'places="{horse.nb_places}" gains="{horse.gains_carriere}" '
+                f'avis="{horse.avis_entraineur}" deferre="{horse.deferre}" '
+                f'value_bet="{horse.is_value_bet}" edge="{horse.edge_percent}" />'
+            )
+            xml_parts.append(xml)
         
         return "\n".join(xml_parts)
     

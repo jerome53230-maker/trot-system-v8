@@ -45,8 +45,8 @@ class ValueBetDetector:
         if horse.score_total < self.min_score:
             return
         
-        if horse.cote < 5.0:
-            # Favoris rarement value
+        if horse.cote <= 0 or horse.cote < 5.0:
+            # Favoris rarement value, ou cote invalide
             return
         
         # Calcul probabilité implicite de la cote

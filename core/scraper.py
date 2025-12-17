@@ -1,17 +1,18 @@
 # ============================================================================
-# TROT SYSTEM v8.0 - SCRAPER PMU
+# TROT SYSTEM v8.0 - SCRAPER PMU (OPTIMISÉ)
 # ============================================================================
 
 import requests
 from typing import Optional, Dict, List
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from models.race import Race, Horse
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 class PMUScraper:
-    """Scraper pour récupérer les données de courses PMU."""
+    """Scraper pour récupérer les données de courses PMU (avec cache et retry)."""
     
     BASE_URL = "https://online.turfinfo.api.pmu.fr/rest/client/1"
     
@@ -20,10 +21,13 @@ class PMUScraper:
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
+        # Cache simple avec TTL (Time To Live)
+        self._cache = {}
+        self._cache_ttl = timedelta(minutes=5)
     
     def get_race_data(self, date_str: str, reunion: int, course: int) -> Optional[Race]:
         """
-        Récupère les données complètes d'une course.
+        Récupère les données complètes d'une course avec cache.
         
         Args:
             date_str: Date format "DDMMYYYY" (ex: "15122025")
@@ -33,6 +37,14 @@ class PMUScraper:
         Returns:
             Objet Race complet ou None si erreur
         """
+        # Vérifier cache
+        cache_key = f"{date_str}_R{reunion}C{course}"
+        if cache_key in self._cache:
+            cached_data, cached_time = self._cache[cache_key]
+            if datetime.now() - cached_time < self._cache_ttl:
+                logger.info(f"✓ Cache hit: {cache_key}")
+                return cached_data
+        
         try:
             # Format date - Garder DDMMYYYY tel quel (ex: 16122025)
             race_date = datetime.strptime(date_str, "%d%m%Y").date()
@@ -60,34 +72,69 @@ class PMUScraper:
             # Construction objet Race
             race = self._build_race_object(course_data, race_date, reunion, course)
             
+            # Mise en cache
+            self._cache[cache_key] = (race, datetime.now())
+            
             logger.info(f"✓ Course R{reunion}C{course} récupérée: {race.hippodrome}, {race.nb_partants} partants")
             return race
             
         except Exception as e:
-            logger.error(f"Erreur scraping: {e}")
+            logger.error(f"Erreur scraping: {e}", exc_info=True)
             return None
     
-    def _fetch_json(self, url: str) -> Optional[Dict]:
-        """Récupère et parse JSON d'une URL."""
-        try:
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"Erreur fetch {url}: {e}")
-            return None
-    
-    def _find_course_in_reunion(self, reunion_data: Dict, course_num: int) -> Optional[Dict]:
-        """Trouve une course spécifique dans les données réunion."""
-        try:
-            courses = reunion_data.get('programme', {}).get('courses', [])
-            for course in courses:
-                if course.get('numOrdre') == course_num:
-                    return course
-            return None
-        except Exception as e:
-            logger.error(f"Erreur recherche course: {e}")
-            return None
+    def _fetch_json(self, url: str, retry_count: int = 2) -> Optional[Dict]:
+        """
+        Récupère et parse JSON avec retry et meilleure gestion erreurs.
+        
+        Args:
+            url: URL à requêter
+            retry_count: Nombre de tentatives en cas d'échec temporaire
+        
+        Returns:
+            Dict JSON ou None
+        """
+        for attempt in range(retry_count + 1):
+            try:
+                response = self.session.get(url, timeout=15)
+                
+                # Gestion codes HTTP explicites
+                if response.status_code == 404:
+                    logger.warning(f"Ressource introuvable (404): {url}")
+                    return None
+                elif response.status_code == 503:
+                    if attempt < retry_count:
+                        wait_time = 2 ** attempt  # Backoff exponentiel
+                        logger.warning(f"API temporairement indisponible (503), retry dans {wait_time}s")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error(f"API indisponible après {retry_count} tentatives")
+                        return None
+                elif response.status_code == 500:
+                    logger.error(f"Erreur serveur API (500): {url}")
+                    return None
+                
+                response.raise_for_status()
+                return response.json()
+                
+            except requests.Timeout:
+                logger.error(f"Timeout requête {url} (attempt {attempt+1}/{retry_count+1})")
+                if attempt < retry_count:
+                    time.sleep(1)
+                    continue
+            except requests.ConnectionError as e:
+                logger.error(f"Erreur connexion {url}: {e}")
+                if attempt < retry_count:
+                    time.sleep(2)
+                    continue
+            except requests.exceptions.JSONDecodeError as e:
+                logger.error(f"Réponse non-JSON de {url}: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"Erreur inattendue {url}: {e}")
+                return None
+        
+        return None
     
     def _build_race_object(self, course_data: Dict, race_date: date, 
                           reunion: int, course: int) -> Race:
@@ -103,7 +150,7 @@ class PMUScraper:
         # Conditions piste
         etat_piste = course_data.get('penetrometre', 'BON')
         
-        # Participants
+        # Participants avec validation
         horses = self._extract_horses(course_data, discipline, hippodrome)
         
         race = Race(
@@ -132,7 +179,7 @@ class PMUScraper:
         return 'ATTELE'  # Par défaut
     
     def _extract_horses(self, course_data: Dict, discipline: str, hippodrome: str) -> List[Horse]:
-        """Extrait la liste des chevaux participants."""
+        """Extrait la liste des chevaux participants avec validation."""
         horses = []
         partants = course_data.get('participants', [])
         
@@ -140,6 +187,9 @@ class PMUScraper:
             try:
                 horse = self._build_horse(p, discipline, hippodrome)
                 horses.append(horse)
+            except ValueError as e:
+                logger.warning(f"Cheval ignoré (données invalides): {e}")
+                continue
             except Exception as e:
                 logger.warning(f"Erreur extraction cheval: {e}")
                 continue
@@ -147,40 +197,64 @@ class PMUScraper:
         return horses
     
     def _build_horse(self, participant: Dict, discipline: str, hippodrome: str) -> Horse:
-        """Construit un objet Horse à partir d'un participant."""
+        """
+        Construit un objet Horse avec validation des données.
         
-        # Identité
+        Raises:
+            ValueError: Si données critiques manquantes ou invalides
+        """
+        
+        # === VALIDATION DONNÉES CRITIQUES ===
+        
+        # Numéro (obligatoire)
         numero = participant.get('numPmu', 0)
-        nom = participant.get('nom', 'INCONNU')
+        if numero <= 0:
+            raise ValueError(f"Numéro cheval invalide: {numero}")
         
-        # Entourage
-        driver = participant.get('driver', {}).get('nom', '')
-        entraineur = participant.get('entraineur', {}).get('nom', '')
-        proprietaire = participant.get('proprietaire', {}).get('nom', '')
+        # Nom (obligatoire)
+        nom = participant.get('nom', '').strip()
+        if not nom:
+            raise ValueError(f"Nom cheval manquant pour #{numero}")
         
-        # Performance
+        # === ENTOURAGE ===
+        driver = participant.get('driver', {}).get('nom', '') if participant.get('driver') else ''
+        entraineur = participant.get('entraineur', {}).get('nom', '') if participant.get('entraineur') else ''
+        proprietaire = participant.get('proprietaire', {}).get('nom', '') if participant.get('proprietaire') else ''
+        
+        # === PERFORMANCE AVEC VALIDATION ===
         musique = participant.get('indicateurInedit', '')
-        nb_courses = participant.get('nombreCourses', 0)
-        nb_victoires = participant.get('nombreVictoires', 0)
-        nb_places = participant.get('nombrePlaces', 0)
-        gains = participant.get('gainsCarriere', 0)
+        nb_courses = max(0, participant.get('nombreCourses', 0))
+        nb_victoires = max(0, participant.get('nombreVictoires', 0))
+        nb_places = max(0, participant.get('nombrePlaces', 0))
+        gains = max(0, participant.get('gainsCarriere', 0))
         
-        # Chronos (à normaliser plus tard)
+        # Validation cohérence statistiques
+        if nb_victoires > nb_places:
+            logger.warning(f"#{numero} {nom}: victoires ({nb_victoires}) > places ({nb_places}), correction")
+            nb_places = nb_victoires
+        if nb_places > nb_courses:
+            logger.warning(f"#{numero} {nom}: places ({nb_places}) > courses ({nb_courses}), correction")
+            nb_courses = nb_places
+        
+        # === CHRONOS ===
         dernier_chrono = self._parse_chrono(participant.get('dernierRapportDirect', {}).get('tempsObtenu'))
         meilleur_chrono = self._parse_chrono(participant.get('recordTemps'))
         
-        # Tactique
+        # === TACTIQUE ===
         deferre = participant.get('deferre', '0')
         specialite = discipline
         
-        # Avis
+        # === AVIS ===
         avis = participant.get('avisEntraineur', 'NEUTRE')
         
-        # Cote
+        # === COTE AVEC GESTION INTELLIGENTE ===
         cote_data = participant.get('rapportDirect', {})
         cote = cote_data.get('rapportProbable', 0.0)
-        if cote == 0:
-            cote = 99.0  # Cote inconnue
+        if cote <= 0 or cote == 0.0:
+            # Cote manquante = marquer None plutôt que 99.0 arbitraire
+            # Le scoring_engine gérera ce cas spécifiquement
+            cote = None
+            logger.debug(f"#{numero} {nom}: cote manquante")
         
         horse = Horse(
             numero=numero,
@@ -199,14 +273,14 @@ class PMUScraper:
             specialite_actuelle=discipline,
             deferre=deferre,
             avis_entraineur=avis,
-            cote=cote
+            cote=cote if cote else 99.0  # Fallback pour compatibilité
         )
         
         return horse
     
     def _parse_chrono(self, chrono_str: Optional[str]) -> Optional[float]:
         """
-        Parse un chrono format "1'14\"2" en secondes.
+        Parse un chrono format "1'14\"2" en secondes avec validation.
         
         Returns:
             Temps en secondes ou None
@@ -223,10 +297,16 @@ class PMUScraper:
                 minutes = int(parts[0])
                 seconds_str = parts[1].replace(',', '.')
                 seconds = float(seconds_str)
-                return minutes * 60 + seconds
+                
+                # Validation cohérence (chrono trot = 1-3 min généralement)
+                total_seconds = minutes * 60 + seconds
+                if total_seconds < 60 or total_seconds > 300:
+                    logger.warning(f"Chrono suspect: {total_seconds}s")
+                
+                return total_seconds
             
             return None
-        except:
+        except (ValueError, AttributeError):
             return None
     
     def get_race_results(self, date_str: str, reunion: int, course: int) -> Optional[Dict]:
@@ -266,7 +346,7 @@ class PMUScraper:
             arrivee.sort()
             arrivee_finale = [num for _, num in arrivee]
             
-            # Rapports
+            # Rapports réels PMU
             rapports = data.get('rapports', {})
             
             return {
@@ -276,8 +356,13 @@ class PMUScraper:
             }
             
         except Exception as e:
-            logger.error(f"Erreur récupération résultats: {e}")
+            logger.error(f"Erreur récupération résultats: {e}", exc_info=True)
             return None
+    
+    def clear_cache(self):
+        """Vide le cache (utile pour tests ou si besoin données fraîches)."""
+        self._cache.clear()
+        logger.info("Cache scraper vidé")
 
 
 # ============================================================================

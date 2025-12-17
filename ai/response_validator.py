@@ -141,6 +141,12 @@ class ResponseValidator:
         
         # Calcul total actuel
         total_actuel = sum(p.get('mise', 0) for p in paris)
+        
+        # Protection division par zéro
+        if total_actuel <= 0:
+            logger.warning("⚠️ Total paris = 0, impossible d'ajuster budget")
+            return response
+        
         max_budget = budget + tolerance
         
         # Ratio réduction

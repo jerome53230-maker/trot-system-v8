@@ -270,6 +270,13 @@ class ScoringEngine:
     def _calculate_global_indicators(self, race: Race):
         """Calcule les indicateurs globaux de la course."""
         
+        # Protection division par zéro
+        if race.nb_partants == 0:
+            race.qualite_donnees = 0
+            race.donnees_manquantes_pct = 100.0
+            race.confiance_globale = 1
+            return
+        
         # Qualité données (% chevaux avec données complètes)
         complete_horses = sum(1 for h in race.horses if len(h.missing_data) <= 1)
         race.qualite_donnees = int((complete_horses / race.nb_partants) * 100)
