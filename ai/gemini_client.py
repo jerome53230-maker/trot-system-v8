@@ -1,5 +1,5 @@
 # ============================================================================
-# TROT SYSTEM v8.0 - CLIENT GEMINI (VERSION ROBUSTE)
+# TROT SYSTEM v8.0 - CLIENT GEMINI 2.x (VERSION FINALE)
 # ============================================================================
 
 import google.generativeai as genai
@@ -13,15 +13,15 @@ from typing import Optional, Dict
 logger = logging.getLogger(__name__)
 
 class GeminiClient:
-    """Client pour l'API Google Gemini avec fallback multi-modèles."""
+    """Client pour l'API Google Gemini avec support Gemini 2.x."""
     
-    # Liste des noms de modèles à tester (ordre de préférence)
+    # Liste des noms de modèles à tester (MISE À JOUR décembre 2024)
     MODEL_NAMES = [
-        "gemini-1.5-flash-8b",          # Dernier modèle Flash (décembre 2024)
-        "gemini-1.5-flash-002",         # Version stable spécifique
-        "gemini-1.5-flash-latest",      # Latest explicite
-        "gemini-1.5-flash",             # Nom original (fallback)
-        "gemini-pro",                   # Fallback Pro (plus cher)
+        "gemini-flash-latest",      # Alias vers dernier Flash (2.5 ou 2.0)
+        "gemini-2.5-flash",         # Flash 2.5 (nouveau)
+        "gemini-2.0-flash",         # Flash 2.0
+        "gemini-pro-latest",        # Alias vers dernier Pro
+        "gemini-2.5-pro",           # Pro 2.5
     ]
     
     def __init__(self, api_key: Optional[str] = None):
@@ -42,6 +42,8 @@ class GeminiClient:
         # Tentative de trouver un modèle qui fonctionne
         self.model = None
         self.model_name = None
+        
+        logger.info("Recherche modèle Gemini disponible...")
         
         for model_name in self.MODEL_NAMES:
             try:
@@ -65,8 +67,8 @@ class GeminiClient:
                     }
                 )
                 
-                # Test rapide
-                response = test_model.generate_content("Test")
+                # Test rapide (très court pour éviter timeout)
+                response = test_model.generate_content("Test", request_options={"timeout": 10})
                 
                 # Si on arrive ici, le modèle fonctionne !
                 self.model = test_model
@@ -75,16 +77,16 @@ class GeminiClient:
                 break
                 
             except Exception as e:
-                logger.warning(f"✗ Modèle {model_name} non disponible: {e}")
+                logger.warning(f"✗ Modèle {model_name} non disponible: {str(e)[:100]}")
                 continue
         
         if not self.model:
-            # Lister modèles disponibles
+            # Lister modèles disponibles pour debug
             available = self._list_available_models()
             raise ValueError(
                 f"Aucun modèle Gemini disponible ! "
                 f"Modèles testés: {self.MODEL_NAMES}. "
-                f"Modèles disponibles: {available}"
+                f"Modèles disponibles: {available[:10]}"
             )
         
         logger.info(f"✓ Client Gemini initialisé (modèle: {self.model_name})")
@@ -119,7 +121,11 @@ class GeminiClient:
         try:
             logger.info(f"Appel Gemini API (modèle: {self.model_name})...")
             
-            response = self.model.generate_content(full_prompt)
+            # Timeout plus long pour les requêtes réelles
+            response = self.model.generate_content(
+                full_prompt,
+                request_options={"timeout": 60}
+            )
             
             # Extraction texte
             if not response or not response.text:
@@ -149,7 +155,10 @@ class GeminiClient:
         """
         try:
             test_prompt = "Réponds simplement 'OK' en JSON: {\"status\": \"OK\"}"
-            response = self.model.generate_content(test_prompt)
+            response = self.model.generate_content(
+                test_prompt,
+                request_options={"timeout": 15}
+            )
             
             if response and response.text:
                 data = json.loads(response.text)
@@ -168,7 +177,7 @@ class GeminiClient:
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("TROT SYSTEM v8.0 - TEST CLIENT GEMINI (ROBUSTE)")
+    print("TROT SYSTEM v8.0 - TEST CLIENT GEMINI 2.x")
     print("=" * 70)
     
     # Test 1: Initialisation
@@ -198,7 +207,8 @@ if __name__ == "__main__":
     simple_prompt = """Réponds en JSON avec:
 {
     "test": "OK",
-    "message": "Gemini fonctionne"
+    "message": "Gemini fonctionne",
+    "model": "Gemini 2.x"
 }"""
     
     result = client.analyze_race(simple_prompt)
@@ -208,3 +218,5 @@ if __name__ == "__main__":
         print("   ✗ Pas de réponse")
     
     print("\n" + "=" * 70)
+    print(f"SUCCESS! Modèle utilisé: {client.model_name}")
+    print("=" * 70)
