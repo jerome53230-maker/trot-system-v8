@@ -1,5 +1,5 @@
 # ============================================================================
-# TROT SYSTEM v8.0 - CLIENT GEMINI FLASH 1.5
+# TROT SYSTEM v8.0 - CLIENT GEMINI (VERSION ROBUSTE)
 # ============================================================================
 
 import google.generativeai as genai
@@ -13,11 +13,20 @@ from typing import Optional, Dict
 logger = logging.getLogger(__name__)
 
 class GeminiClient:
-    """Client pour l'API Google Gemini Flash 1.5."""
+    """Client pour l'API Google Gemini avec fallback multi-modèles."""
+    
+    # Liste des noms de modèles à tester (ordre de préférence)
+    MODEL_NAMES = [
+        "gemini-1.5-flash-8b",          # Dernier modèle Flash (décembre 2024)
+        "gemini-1.5-flash-002",         # Version stable spécifique
+        "gemini-1.5-flash-latest",      # Latest explicite
+        "gemini-1.5-flash",             # Nom original (fallback)
+        "gemini-pro",                   # Fallback Pro (plus cher)
+    ]
     
     def __init__(self, api_key: Optional[str] = None):
         """
-        Initialise le client Gemini.
+        Initialise le client Gemini avec détection automatique du modèle.
         
         Args:
             api_key: Clé API Google (ou env var GEMINI_API_KEY)
@@ -30,25 +39,67 @@ class GeminiClient:
         # Configuration API
         genai.configure(api_key=self.api_key)
         
-        # Modèle + paramètres
-        self.model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-002",
-            generation_config={
-                "temperature": 0.4,        # Équilibre créativité/déterminisme
-                "top_p": 0.95,
-                "top_k": 40,
-                "max_output_tokens": 8192,
-                "response_mime_type": "application/json"  # 🔥 Force JSON pur
-            },
-            safety_settings={
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
-        )
+        # Tentative de trouver un modèle qui fonctionne
+        self.model = None
+        self.model_name = None
         
-        logger.info("✓ Client Gemini Flash 1.5 initialisé")
+        for model_name in self.MODEL_NAMES:
+            try:
+                logger.info(f"Tentative modèle: {model_name}")
+                
+                # Créer modèle de test
+                test_model = genai.GenerativeModel(
+                    model_name=model_name,
+                    generation_config={
+                        "temperature": 0.4,
+                        "top_p": 0.95,
+                        "top_k": 40,
+                        "max_output_tokens": 8192,
+                        "response_mime_type": "application/json"
+                    },
+                    safety_settings={
+                        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                    }
+                )
+                
+                # Test rapide
+                response = test_model.generate_content("Test")
+                
+                # Si on arrive ici, le modèle fonctionne !
+                self.model = test_model
+                self.model_name = model_name
+                logger.info(f"✓ Modèle fonctionnel trouvé: {model_name}")
+                break
+                
+            except Exception as e:
+                logger.warning(f"✗ Modèle {model_name} non disponible: {e}")
+                continue
+        
+        if not self.model:
+            # Lister modèles disponibles
+            available = self._list_available_models()
+            raise ValueError(
+                f"Aucun modèle Gemini disponible ! "
+                f"Modèles testés: {self.MODEL_NAMES}. "
+                f"Modèles disponibles: {available}"
+            )
+        
+        logger.info(f"✓ Client Gemini initialisé (modèle: {self.model_name})")
+    
+    def _list_available_models(self) -> list:
+        """Liste les modèles disponibles pour cette API key."""
+        try:
+            models = []
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    models.append(m.name)
+            return models
+        except Exception as e:
+            logger.error(f"Impossible de lister modèles: {e}")
+            return []
     
     @retry(
         stop=stop_after_attempt(3),
@@ -66,7 +117,7 @@ class GeminiClient:
             Dict JSON ou None si échec
         """
         try:
-            logger.info("Appel Gemini API...")
+            logger.info(f"Appel Gemini API (modèle: {self.model_name})...")
             
             response = self.model.generate_content(full_prompt)
             
@@ -117,28 +168,33 @@ class GeminiClient:
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("TROT SYSTEM v8.0 - TEST CLIENT GEMINI")
+    print("TROT SYSTEM v8.0 - TEST CLIENT GEMINI (ROBUSTE)")
     print("=" * 70)
     
     # Test 1: Initialisation
-    print("\n1. Test initialisation client")
+    print("\n1. Test initialisation client (détection auto modèle)")
     try:
         client = GeminiClient()
-        print("   ✓ Client initialisé")
+        print(f"   ✓ Client initialisé avec modèle: {client.model_name}")
     except ValueError as e:
         print(f"   ✗ Erreur: {e}")
-        print("   → Définir GEMINI_API_KEY en variable d'environnement")
         exit(1)
     
-    # Test 2: Connexion
-    print("\n2. Test connexion API")
+    # Test 2: Liste modèles disponibles
+    print("\n2. Modèles disponibles:")
+    available = client._list_available_models()
+    for model in available[:10]:  # Top 10
+        print(f"   - {model}")
+    
+    # Test 3: Connexion
+    print("\n3. Test connexion API")
     if client.test_connection():
         print("   ✓ Connexion Gemini OK")
     else:
         print("   ✗ Connexion échouée")
     
-    # Test 3: Requête simple
-    print("\n3. Test requête JSON")
+    # Test 4: Requête JSON
+    print("\n4. Test requête JSON")
     simple_prompt = """Réponds en JSON avec:
 {
     "test": "OK",
