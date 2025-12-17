@@ -32,7 +32,7 @@ class GeminiClient:
         
         # Modèle + paramètres
         self.model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name="gemini-1.5-flash-latest",
             generation_config={
                 "temperature": 0.4,        # Équilibre créativité/déterminisme
                 "top_p": 0.95,
