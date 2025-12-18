@@ -40,8 +40,8 @@ class PMUScraper:
         Returns:
             Objet Race complet ou None si erreur
         """
-        print(f"🎯 SCRAPER V2: {date_str} R{reunion}C{course}")
-        logger.info(f"🎯 SCRAPER V2: {date_str} R{reunion}C{course}")
+        print(f"🎯 SCRAPER V2 DÉMARRAGE: {date_str} R{reunion}C{course}")
+        logger.info(f"🎯 SCRAPER V2 DÉMARRAGE: {date_str} R{reunion}C{course}")
         logger.info(f"📊 Scraping: {date_str} R{reunion}C{course}")
         
         try:
@@ -52,16 +52,18 @@ class PMUScraper:
             course_url = f"{self.BASE_URL}/programme/{date_str}/R{reunion}/C{course}"
             
             # === ÉTAPE 1: Infos course (sans participants) ===
-            logger.info(f"📥 Infos course: {course_url}")
+            logger.info(f"📥 Étape 1: Infos course: {course_url}")
             course_data = self._fetch_json(course_url)
             
             if not course_data:
                 logger.error(f"❌ Course R{reunion}C{course} introuvable")
                 return None
             
+            logger.info(f"✓ Étape 1 OK: Course data récupérée")
+            
             # === ÉTAPE 2: Participants (endpoint séparé - VALIDÉ PAR DIAGNOSTIC) ===
             participants_url = f"{course_url}/participants"
-            logger.info(f"📥 Participants: {participants_url}")
+            logger.info(f"📥 Étape 2: Participants: {participants_url}")
             
             part_response = self._fetch_json(participants_url)
             
@@ -69,11 +71,15 @@ class PMUScraper:
                 logger.error(f"❌ Participants introuvables")
                 return None
             
+            logger.info(f"✓ Étape 2 OK: Participants response récupérée")
+            
             # Extraire participants (format validé par diagnostic)
             if isinstance(part_response, dict) and 'participants' in part_response:
                 participants = part_response['participants']
+                logger.info(f"✓ Format: Dict avec 'participants' - {len(participants)} éléments")
             elif isinstance(part_response, list):
                 participants = part_response
+                logger.info(f"✓ Format: Liste directe - {len(participants)} éléments")
             else:
                 logger.error(f"❌ Format participants inconnu: {type(part_response)}")
                 return None
@@ -92,6 +98,8 @@ class PMUScraper:
             
             # Ajouter participants aux données
             course_data['participants'] = participants
+            
+            logger.info(f"📥 Étape 3: Construction Race...")
             
             # === ÉTAPE 3: Construction Race ===
             race = self._build_race_object(course_data, race_date, reunion, course)
@@ -221,8 +229,13 @@ class PMUScraper:
     
     def _extract_horses(self, course_data: Dict, discipline: str, hippodrome: str) -> List[Horse]:
         """Extrait la liste des chevaux participants."""
+        print(f"🔨 _extract_horses APPELÉ")
+        logger.info(f"🔨 _extract_horses: Début extraction")
+        
         horses = []
         participants = course_data.get('participants', [])
+        
+        logger.info(f"📋 {len(participants)} participants à traiter")
         
         for i, p in enumerate(participants):
             try:
@@ -305,13 +318,13 @@ class PMUScraper:
             entraineur=entraineur,
             proprietaire=proprietaire,
             musique=musique,
-            courses=nb_courses,
-            victoires=nb_victoires,
-            places=nb_places,
+            nb_courses=nb_courses,  # ✅ CORRIGÉ !
+            nb_victoires=nb_victoires,  # ✅ CORRIGÉ !
+            nb_places=nb_places,  # ✅ CORRIGÉ !
             gains_carriere=gains,
             dernier_chrono=dernier_chrono,
             meilleur_chrono=meilleur_chrono,
-            cote_probable=cote_probable,
+            cote=cote_probable if cote_probable else 0.0,  # ✅ CORRIGÉ !
             deferre=deferre,
             specialite=discipline,
             avis_entraineur=avis,

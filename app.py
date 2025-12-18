@@ -446,8 +446,8 @@ def analyze_race():
             horse_sample = race.horses[0]
             logger.info(f"   Exemple cheval: {horse_sample.nom} (#{horse_sample.numero})")
             logger.info(f"   - Musique: {horse_sample.musique[:20] if horse_sample.musique else 'N/A'}...")
-            logger.info(f"   - Stats: {horse_sample.victoires}V/{horse_sample.courses}C")
-            logger.info(f"   - Cote: {horse_sample.cote_probable}")
+            logger.info(f"   - Stats: {horse_sample.nb_victoires}V/{horse_sample.nb_courses}C")
+            logger.info(f"   - Cote: {horse_sample.cote}")
         else:
             logger.warning("⚠️ Aucun partant trouvé !")
         
