@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Analyses IA pour courses de trot - Trot System v8">
+    <title>🐴 Trot System v8 - Analyses Hippiques IA</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Configuration Tailwind -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        primary: '#3b82f6',
+                        secondary: '#8b5cf6'
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .gradient-bg {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .card-hover {
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card-hover:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3);
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.5s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white min-h-screen">
+
+    <!-- Header -->
+    <header class="gradient-bg shadow-2xl">
+        <div class="container mx-auto px-4 py-6">
+            <div class="flex items-center justify-between">
+                <div>
+                    <h1 class="text-4xl font-bold flex items-center gap-3">
+                        🐴 <span>Trot System v8</span>
+                    </h1>
+                    <p class="text-blue-100 mt-1">Analyses IA propulsées par Gemini pour courses de trot</p>
+                </div>
+                <div class="hidden md:flex items-center gap-4">
+                    <div class="bg-white/20 backdrop-blur-sm px-4 py-2 rounded-lg">
+                        <div class="text-sm opacity-80">API Status</div>
+                        <div id="apiStatus" class="font-bold">Vérification...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="container mx-auto px-4 py-8">
+
+        <!-- Formulaire Analyse -->
+        <section class="bg-gray-800 rounded-2xl shadow-2xl p-8 mb-8 animate-fade-in">
+            <div class="flex items-center gap-3 mb-6">
+                <span class="text-4xl">📊</span>
+                <h2 class="text-3xl font-bold">Analyser une Course</h2>
+            </div>
+            
+            <form id="raceForm" class="space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <!-- Date -->
+                    <div>
+                        <label for="date" class="block text-sm font-medium mb-2 text-gray-300">
+                            📅 Date (JJMMAAAA)
+                        </label>
+                        <input 
+                            type="text" 
+                            id="date" 
+                            placeholder="18122025" 
+                            maxlength="8"
+                            class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                            required
+                        >
+                        <p class="text-xs text-gray-400 mt-1">Format: jour mois année</p>
+                    </div>
+                    
+                    <!-- Réunion -->
+                    <div>
+                        <label for="reunion" class="block text-sm font-medium mb-2 text-gray-300">
+                            🏁 Réunion
+                        </label>
+                        <input 
+                            type="number" 
+                            id="reunion" 
+                            min="1" 
+                            max="9" 
+                            placeholder="1"
+                            class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                            required
+                        >
+                        <p class="text-xs text-gray-400 mt-1">Entre 1 et 9</p>
+                    </div>
+                    
+                    <!-- Course -->
+                    <div>
+                        <label for="course" class="block text-sm font-medium mb-2 text-gray-300">
+                            🎯 Course
+                        </label>
+                        <input 
+                            type="number" 
+                            id="course" 
+                            min="1" 
+                            max="16" 
+                            placeholder="1"
+                            class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                            required
+                        >
+                        <p class="text-xs text-gray-400 mt-1">Entre 1 et 16</p>
+                    </div>
+                    
+                    <!-- Budget -->
+                    <div>
+                        <label for="budget" class="block text-sm font-medium mb-2 text-gray-300">
+                            💰 Budget
+                        </label>
+                        <select 
+                            id="budget" 
+                            class="w-full p-3 bg-gray-700 border border-gray-600 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition cursor-pointer"
+                        >
+                            <option value="5">5€</option>
+                            <option value="10">10€</option>
+                            <option value="15">15€</option>
+                            <option value="20" selected>20€</option>
+                        </select>
+                        <p class="text-xs text-gray-400 mt-1">Mise totale</p>
+                    </div>
+                </div>
+                
+                <!-- Bouton Submit -->
+                <div class="flex gap-4">
+                    <button 
+                        type="submit" 
+                        id="submitBtn"
+                        class="flex-1 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 p-4 rounded-lg font-bold text-lg shadow-lg hover:shadow-xl transition transform hover:scale-105 flex items-center justify-center gap-2"
+                    >
+                        <span>🚀</span>
+                        <span>Analyser la Course</span>
+                    </button>
+                    
+                    <button 
+                        type="button"
+                        id="clearBtn"
+                        class="px-6 bg-gray-700 hover:bg-gray-600 p-4 rounded-lg font-medium transition"
+                    >
+                        🗑️ Effacer
+                    </button>
+                </div>
+            </form>
+        </section>
+
+        <!-- Loading -->
+        <div id="loading" class="hidden bg-gray-800 rounded-2xl shadow-2xl p-12 text-center animate-fade-in">
+            <div class="flex flex-col items-center gap-4">
+                <div class="relative w-20 h-20">
+                    <div class="absolute top-0 left-0 w-full h-full border-4 border-blue-500/30 rounded-full"></div>
+                    <div class="absolute top-0 left-0 w-full h-full border-4 border-t-blue-500 rounded-full animate-spin"></div>
+                </div>
+                <h3 class="text-2xl font-bold">Analyse en cours...</h3>
+                <p class="text-gray-400">L'IA Gemini analyse la course</p>
+                <div class="flex gap-2 mt-4">
+                    <div class="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style="animation-delay: 0ms"></div>
+                    <div class="w-2 h-2 bg-purple-500 rounded-full animate-bounce" style="animation-delay: 150ms"></div>
+                    <div class="w-2 h-2 bg-pink-500 rounded-full animate-bounce" style="animation-delay: 300ms"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Error -->
+        <div id="error" class="hidden bg-red-900/50 border border-red-500 rounded-2xl p-6 mb-8 animate-fade-in">
+            <div class="flex items-start gap-4">
+                <span class="text-4xl">⚠️</span>
+                <div class="flex-1">
+                    <h3 class="text-xl font-bold mb-2">Erreur</h3>
+                    <p id="errorMessage" class="text-red-200"></p>
+                </div>
+                <button onclick="document.getElementById('error').classList.add('hidden')" class="text-red-200 hover:text-white">
+                    ✕
+                </button>
+            </div>
+        </div>
+
+        <!-- Résultats -->
+        <div id="results" class="hidden space-y-8 animate-fade-in">
+            
+            <!-- En-tête Résultats -->
+            <div class="bg-gray-800 rounded-2xl shadow-2xl p-6">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h2 class="text-2xl font-bold mb-1">📈 Résultats de l'Analyse</h2>
+                        <p id="raceInfo" class="text-gray-400"></p>
+                    </div>
+                    <button 
+                        onclick="window.print()" 
+                        class="hidden md:block bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded-lg transition"
+                    >
+                        🖨️ Imprimer
+                    </button>
+                </div>
+            </div>
+
+            <!-- Scénario Principal -->
+            <div id="scenarioCard" class="rounded-2xl shadow-2xl p-8 text-center card-hover">
+                <div class="text-6xl mb-4" id="scenarioEmoji"></div>
+                <h3 class="text-4xl font-bold mb-2" id="scenarioTitle"></h3>
+                <p class="text-xl opacity-90" id="scenarioSubtitle"></p>
+                <div class="mt-6 flex justify-center gap-8">
+                    <div>
+                        <div class="text-3xl font-bold" id="confidence"></div>
+                        <div class="text-sm opacity-75">Confiance</div>
+                    </div>
+                    <div class="w-px bg-white/20"></div>
+                    <div>
+                        <div class="text-3xl font-bold" id="nbChevaux"></div>
+                        <div class="text-sm opacity-75">Chevaux analysés</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Top 5 Chevaux -->
+            <div class="bg-gray-800 rounded-2xl shadow-2xl p-8">
+                <h3 class="text-2xl font-bold mb-6 flex items-center gap-3">
+                    <span>🏆</span>
+                    <span>Top 5 Chevaux</span>
+                </h3>
+                <div id="top5" class="grid grid-cols-1 md:grid-cols-5 gap-4"></div>
+            </div>
+
+            <!-- Paris Recommandés -->
+            <div class="bg-gray-800 rounded-2xl shadow-2xl p-8">
+                <h3 class="text-2xl font-bold mb-6 flex items-center gap-3">
+                    <span>💰</span>
+                    <span>Paris Recommandés</span>
+                </h3>
+                <div id="paris" class="space-y-4"></div>
+                <div class="mt-6 pt-6 border-t border-gray-700">
+                    <div class="flex justify-between items-center text-xl font-bold">
+                        <span>Total Budget</span>
+                        <span id="totalBudget" class="text-green-400"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Value Bets -->
+            <div id="valueBetsSection" class="hidden bg-gray-800 rounded-2xl shadow-2xl p-8">
+                <h3 class="text-2xl font-bold mb-6 flex items-center gap-3">
+                    <span>💎</span>
+                    <span>Value Bets Détectés</span>
+                </h3>
+                <div id="valueBets" class="space-y-4"></div>
+            </div>
+
+            <!-- Analyse IA -->
+            <div class="bg-gradient-to-br from-purple-900/50 to-blue-900/50 rounded-2xl shadow-2xl p-8 border border-purple-500/30">
+                <h3 class="text-2xl font-bold mb-4 flex items-center gap-3">
+                    <span>🤖</span>
+                    <span>Analyse Complète IA</span>
+                </h3>
+                <div id="raisonnement" class="text-gray-200 leading-relaxed space-y-3"></div>
+                
+                <!-- Bouton Analyse Complète -->
+                <button 
+                    onclick="showFullAnalysis()"
+                    class="mt-6 w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-bold py-4 px-6 rounded-xl transition duration-200 flex items-center justify-center gap-3 shadow-lg hover:shadow-xl transform hover:scale-[1.02]"
+                >
+                    <span class="text-2xl">🤖</span>
+                    <span>VOIR L'ANALYSE COMPLÈTE DÉTAILLÉE</span>
+                    <span class="text-2xl">📊</span>
+                </button>
+            </div>
+
+            <!-- Actions -->
+            <div class="flex gap-4">
+                <button 
+                    id="newAnalysisBtn"
+                    class="flex-1 bg-blue-600 hover:bg-blue-700 p-4 rounded-lg font-bold transition"
+                >
+                    🔄 Nouvelle Analyse
+                </button>
+                <button 
+                    id="debrieBtn"
+                    class="flex-1 bg-purple-600 hover:bg-purple-700 p-4 rounded-lg font-bold transition"
+                >
+                    📊 Voir Débriefing
+                </button>
+            </div>
+        </div>
+
+        <!-- Historique -->
+        <section id="historySection" class="mt-12 bg-gray-800 rounded-2xl shadow-2xl p-8 hidden">
+            <h3 class="text-2xl font-bold mb-6 flex items-center gap-3">
+                <span>📚</span>
+                <span>Historique des Analyses</span>
+            </h3>
+            <div id="history" class="space-y-3"></div>
+        </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer class="bg-gray-800 mt-12 py-8 border-t border-gray-700">
+        <div class="container mx-auto px-4 text-center text-gray-400">
+            <p class="mb-2">🐴 Trot System v8 - Propulsé par IA Gemini</p>
+            <p class="text-sm">
+                <a href="https://github.com" class="hover:text-white transition">GitHub</a> • 
+                <a href="/diagnostic" class="hover:text-white transition">Diagnostic</a> • 
+                <a href="/health" class="hover:text-white transition">Status API</a>
+            </p>
+        </div>
+    </footer>
+
+    <!-- Script JavaScript -->
+    <script src="app.js"></script>
+
+</body>
+</html>
