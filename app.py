@@ -76,16 +76,16 @@ def load_history() -> List[Dict]:
             return []
 
 def save_history(history: List[Dict]):
+def save_history(history: List[Dict]):
     """Sauvegarde l'historique dans PostgreSQL ou JSON"""
     if USE_POSTGRESQL:
         try:
             if not history:
                 return
             
-            conn = psycopg2.connect(DATABASE_URL)
+            conn = psycopg.connect(DATABASE_URL)
             cur = conn.cursor()
             
-            # Insérer dernière entrée
             last = history[-1]
             cur.execute("""
                 INSERT INTO history 
@@ -100,22 +100,7 @@ def save_history(history: List[Dict]):
                 last.get('budget', 20),
                 last.get('roi_attendu', 0),
                 last.get('nb_paris', 0)
-            ))
-            
-            conn.commit()
-            cur.close()
-            conn.close()
-            logger.info("✅ Historique sauvegardé (PostgreSQL)")
-        except Exception as e:
-            logger.error(f"Erreur save_history PostgreSQL: {e}")
-    else:
-        try:
-            HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
-                json.dump(history, f, indent=2, ensure_ascii=False)
-            logger.info("✅ Historique sauvegardé (JSON)")
-        except Exception as e:
-            logger.error(f"Erreur save_history JSON: {e}")
+            ))JSON: {e}")
 
 # Initialisation historique
 history_store = load_history()
