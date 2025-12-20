@@ -24,10 +24,10 @@ logger = logging.getLogger(__name__)
 USE_POSTGRESQL = os.getenv('DATABASE_URL') is not None
 
 if USE_POSTGRESQL:
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
+    if USE_POSTGRESQL:
+    import psycopg
     DATABASE_URL = os.getenv('DATABASE_URL')
-    logger.info("✅ Mode PostgreSQL activé")
+    logger.info("âœ… Mode PostgreSQL activÃ©")
 else:
     HISTORY_FILE = Path(__file__).parent / "data" / "history.json"
     logger.info("⚠️ Mode fichier JSON (données perdues au redémarrage)")
