@@ -1,8 +1,25 @@
+# Trot System v8.0 - Requirements
+# Python 3.11+ (compatible Python 3.13)
+
+# Framework Web
 Flask==3.0.0
 flask-cors==4.0.0
-requests==2.31.0
-psycopg[binary]==3.3.2
-google-generativeai==0.3.2
-prometheus-client==0.19.0
 gunicorn==21.2.0
+
+# HTTP Requests
+requests==2.31.0
+
+# Google Generative AI
+google-generativeai==0.8.3
+
+# Retry Logic
+tenacity==8.2.3
+
+# Date Utils
+python-dateutil==2.8.2
+
+# Environment Variables
 python-dotenv==1.0.0
+
+# Monitoring (optionnel)
+prometheus-client==0.19.0
