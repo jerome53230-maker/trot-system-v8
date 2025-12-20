@@ -1,5 +1,5 @@
-# Trot System v8.0 - Requirements MINIMAL
-# Version standalone sans dépendances externes
+# Trot System v8.0 - Requirements COMPLET Standalone
+# Version avec endpoint /race fonctionnel
 # Python 3.11+ (compatible Python 3.13)
 
 # Framework Web
@@ -7,5 +7,8 @@ Flask==3.0.0
 flask-cors==4.0.0
 gunicorn==21.2.0
 
-# Google Generative AI (optionnel pour test Gemini)
+# HTTP Requests (pour scraping PMU)
+requests==2.31.0
+
+# Google Generative AI (pour analyse IA)
 google-generativeai==0.8.3

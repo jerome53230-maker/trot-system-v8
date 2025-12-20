@@ -1,6 +1,7 @@
 """
-TROT SYSTEM v8.0 - API FLASK MINIMALE STANDALONE
-Version simplifiée sans dépendances externes
+TROT SYSTEM v8.0 - API FLASK COMPLÈTE STANDALONE
+Version avec endpoint /race fonctionnel
+Sans dépendances externes
 Compatible Python 3.13
 """
 
@@ -8,6 +9,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import json
+import requests
 from datetime import datetime
 from pathlib import Path
 import logging
@@ -23,11 +25,221 @@ logging.basicConfig(
 )
 logger = logging.getLogger('trot-system')
 
-# Configuration Gemini (optionnel)
+# Configuration Gemini
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # Historique simple (JSON en mémoire)
 history_store = []
+
+# Cache simple pour scraping
+cache = {}
+
+# ============================================================================
+# FONCTIONS UTILITAIRES
+# ============================================================================
+
+def scrape_pmu_race(date_str, reunion, course):
+    """
+    Scrape les données d'une course PMU.
+    Version simplifiée sans classe PMUScraper.
+    """
+    try:
+        # Vérifier cache
+        cache_key = f"{date_str}-R{reunion}C{course}"
+        if cache_key in cache:
+            logger.info("✅ Données depuis cache")
+            return cache[cache_key]
+        
+        # URL API PMU
+        url = f"https://online.turfinfo.api.pmu.fr/rest/client/1/programme/{date_str}/R{reunion}/C{course}"
+        logger.info(f"📡 Récupération course: {url}")
+        
+        # Requête
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        # Parser les données essentielles
+        race_data = {
+            'date': date_str,
+            'reunion': reunion,
+            'course': course,
+            'hippodrome': data.get('libelleLongHippodrome', 'INCONNU'),
+            'discipline': data.get('discipline', 'TROT'),
+            'distance': data.get('distance', 0),
+            'nb_partants': len(data.get('participants', [])),
+            'partants': []
+        }
+        
+        # Parser les partants
+        for p in data.get('participants', []):
+            partant = {
+                'numero': p.get('numPmu', 0),
+                'nom': p.get('nom', ''),
+                'driver': p.get('driver', ''),
+                'entraineur': p.get('entraineur', ''),
+                'cote': p.get('rapport', {}).get('direct', {}).get('rapportDirect', 0.0),
+                'musique': p.get('musique', ''),
+                'age': p.get('age', 0),
+                'sexe': p.get('sexe', ''),
+                'score': 0.0  # Sera calculé
+            }
+            race_data['partants'].append(partant)
+        
+        logger.info(f"✅ Course récupérée: {race_data['nb_partants']} partants")
+        
+        # Cache
+        cache[cache_key] = race_data
+        
+        return race_data
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur scraping: {e}")
+        return None
+
+
+def score_horses(race_data):
+    """
+    Scoring simplifié des chevaux.
+    Version standalone sans ScoringEngine.
+    """
+    try:
+        logger.info(f"🔢 Scoring {race_data['nb_partants']} chevaux...")
+        
+        for partant in race_data['partants']:
+            score = 50.0  # Score de base
+            
+            # Bonus cote attractive (entre 3 et 15)
+            cote = partant.get('cote', 0)
+            if 3 <= cote <= 15:
+                score += 15
+            elif cote < 3:
+                score += 5
+            
+            # Bonus musique récente
+            musique = partant.get('musique', '')
+            if musique:
+                # Compte les '1' dans les 5 dernières courses
+                recent = musique[:5] if len(musique) >= 5 else musique
+                nb_victoires = recent.count('1')
+                score += nb_victoires * 10
+            
+            # Pénalité si jeune (< 3 ans)
+            if partant.get('age', 0) < 3:
+                score -= 5
+            
+            partant['score'] = round(score, 2)
+        
+        # Trier par score décroissant
+        race_data['partants'].sort(key=lambda x: x['score'], reverse=True)
+        
+        logger.info(f"✅ Scoring terminé. Top 5: {[p['numero'] for p in race_data['partants'][:5]]}")
+        
+        return race_data
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur scoring: {e}")
+        return race_data
+
+
+def generate_bets(race_data, budget):
+    """
+    Génère des recommandations de paris.
+    Version simplifiée sans stratégie complexe.
+    """
+    try:
+        logger.info(f"💰 Génération paris avec budget {budget}€...")
+        
+        paris = []
+        top_5 = race_data['partants'][:5]
+        
+        if budget >= 20:
+            # Budget 20€: 3 paris
+            paris = [
+                {
+                    'type': 'SIMPLE_GAGNANT',
+                    'chevaux': [top_5[0]['numero']],
+                    'mise': 5,
+                    'roi_attendu': 2.5,
+                    'justification': f"Favori n°{top_5[0]['numero']} - Score {top_5[0]['score']}"
+                },
+                {
+                    'type': 'SIMPLE_PLACE',
+                    'chevaux': [top_5[1]['numero']],
+                    'mise': 5,
+                    'roi_attendu': 1.5,
+                    'justification': f"Outsider n°{top_5[1]['numero']} - Score {top_5[1]['score']}"
+                },
+                {
+                    'type': 'COUPLE_PLACE',
+                    'chevaux': [top_5[0]['numero'], top_5[1]['numero']],
+                    'mise': 10,
+                    'roi_attendu': 3.0,
+                    'justification': f"Couple {top_5[0]['numero']}-{top_5[1]['numero']}"
+                }
+            ]
+        elif budget >= 10:
+            # Budget 10€: 2 paris
+            paris = [
+                {
+                    'type': 'SIMPLE_GAGNANT',
+                    'chevaux': [top_5[0]['numero']],
+                    'mise': 5,
+                    'roi_attendu': 2.5,
+                    'justification': f"Favori n°{top_5[0]['numero']}"
+                },
+                {
+                    'type': 'SIMPLE_PLACE',
+                    'chevaux': [top_5[1]['numero']],
+                    'mise': 5,
+                    'roi_attendu': 1.5,
+                    'justification': f"Outsider n°{top_5[1]['numero']}"
+                }
+            ]
+        else:
+            # Budget 5€: 1 pari
+            paris = [
+                {
+                    'type': 'SIMPLE_GAGNANT',
+                    'chevaux': [top_5[0]['numero']],
+                    'mise': 5,
+                    'roi_attendu': 2.5,
+                    'justification': f"Favori n°{top_5[0]['numero']}"
+                }
+            ]
+        
+        logger.info(f"✅ {len(paris)} paris générés")
+        
+        return paris
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur génération paris: {e}")
+        return []
+
+
+def call_gemini(prompt):
+    """
+    Appelle l'API Gemini.
+    Version simplifiée sans GeminiClient.
+    """
+    try:
+        if not GEMINI_API_KEY:
+            logger.warning("⚠️ GEMINI_API_KEY non configurée")
+            return "Analyse indisponible (clé API manquante)"
+        
+        import google.generativeai as genai
+        
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        response = model.generate_content(prompt)
+        
+        return response.text
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur Gemini: {e}")
+        return f"Erreur analyse IA: {str(e)}"
+
 
 # ============================================================================
 # ENDPOINTS API
@@ -37,54 +249,30 @@ history_store = []
 def home():
     """Page d'accueil avec documentation API."""
     return jsonify({
-        "name": "Trot System v8.0 - Minimal",
-        "version": "8.0.0-minimal",
-        "description": "API Flask minimale pour système d'analyse hippique",
+        "name": "Trot System v8.0 - Standalone",
+        "version": "8.0.0-standalone",
+        "description": "API Flask complète standalone pour analyse hippique",
         "status": "operational",
         "endpoints": {
             "/": "GET - Cette page",
             "/health": "GET - Health check",
-            "/test-gemini": "GET - Test connexion Gemini API",
+            "/race": "GET ?date=DDMMYYYY&r=1&c=4&budget=20 - Analyse course",
             "/history": "GET - Historique des analyses"
-        },
-        "documentation": "Version minimale standalone sans dépendances externes"
+        }
     })
 
 
 @app.route('/health')
 def health():
-    """
-    Health check de l'application.
-    
-    Returns:
-        JSON avec status de santé
-    """
+    """Health check de l'application."""
     try:
-        # Test basique
         health_status = {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
-            "python_version": "3.13+",
-            "flask": "ok",
-            "cors": "ok",
             "gemini_api_key": "configured" if GEMINI_API_KEY else "missing",
+            "cache_entries": len(cache),
             "historique_entries": len(history_store)
         }
-        
-        # Test Gemini si clé disponible
-        if GEMINI_API_KEY:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=GEMINI_API_KEY)
-                model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                # Test simple
-                response = model.generate_content("Test")
-                health_status["gemini_api"] = "ok"
-            except Exception as e:
-                logger.warning(f"Gemini test failed: {e}")
-                health_status["gemini_api"] = f"error: {str(e)}"
-        else:
-            health_status["gemini_api"] = "no_api_key"
         
         return jsonify(health_status), 200
     
@@ -92,102 +280,127 @@ def health():
         logger.error(f"Health check error: {e}")
         return jsonify({
             "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
+            "error": str(e)
         }), 503
 
 
-@app.route('/test-gemini')
-def test_gemini():
+@app.route('/race', methods=['GET'])
+def analyze_race():
     """
-    Test de connexion à l'API Gemini.
+    Analyse une course et génère recommandations paris.
+    
+    Query params:
+        date: DDMMYYYY (ex: 20122025)
+        r: Numéro réunion (1-9)
+        c: Numéro course (1-16)
+        budget: Budget en euros (5|10|15|20, défaut=20)
     
     Returns:
-        JSON avec résultat du test
+        JSON avec analyse complète
     """
-    if not GEMINI_API_KEY:
-        return jsonify({
-            "status": "error",
-            "message": "GEMINI_API_KEY non configurée",
-            "help": "Ajouter GEMINI_API_KEY dans Environment Variables sur Render"
-        }), 400
-    
     try:
-        import google.generativeai as genai
+        # Extraction paramètres
+        date_str = request.args.get('date')
+        reunion = request.args.get('r', type=int)
+        course = request.args.get('c', type=int)
+        budget = request.args.get('budget', default=20, type=int)
         
-        # Configuration
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        # Validation
+        if not date_str or not reunion or not course:
+            return jsonify({
+                "error": "Paramètres manquants",
+                "usage": "/race?date=20122025&r=1&c=4&budget=20"
+            }), 400
         
-        # Test simple
-        test_prompt = "Réponds juste 'OK' si tu me reçois."
-        response = model.generate_content(test_prompt)
+        if budget not in [5, 10, 15, 20]:
+            return jsonify({
+                "error": "Budget invalide (5|10|15|20)"
+            }), 400
         
-        return jsonify({
-            "status": "success",
-            "message": "Connexion Gemini OK",
-            "model": "gemini-2.0-flash-exp",
-            "test_prompt": test_prompt,
-            "response": response.text,
+        logger.info(f"📊 Analyse course: {date_str} R{reunion}C{course} (Budget: {budget}€)")
+        
+        # PHASE 1: Scraping
+        logger.info("1️⃣ Scraping PMU...")
+        race_data = scrape_pmu_race(date_str, reunion, course)
+        
+        if not race_data:
+            return jsonify({
+                "error": "Course introuvable ou données indisponibles"
+            }), 404
+        
+        # PHASE 2: Scoring
+        logger.info("2️⃣ Scoring chevaux...")
+        race_data = score_horses(race_data)
+        
+        # PHASE 3: Génération paris
+        logger.info("3️⃣ Génération paris...")
+        paris_recommandes = generate_bets(race_data, budget)
+        
+        # PHASE 4: Analyse Gemini (optionnel)
+        logger.info("4️⃣ Analyse IA...")
+        top_5 = race_data['partants'][:5]
+        prompt = f"""Analyse cette course de trot:
+Hippodrome: {race_data['hippodrome']}
+Distance: {race_data['distance']}m
+Top 5 chevaux:
+{json.dumps([{'numero': p['numero'], 'nom': p['nom'], 'score': p['score'], 'cote': p['cote']} for p in top_5], indent=2)}
+
+Donne une analyse courte (3-4 lignes) avec ton pronostic."""
+        
+        analyse_ia = call_gemini(prompt)
+        
+        # Résultat final
+        result = {
+            "date": date_str,
+            "reunion": reunion,
+            "course": course,
+            "hippodrome": race_data['hippodrome'],
+            "distance": race_data['distance'],
+            "nb_partants": race_data['nb_partants'],
+            "top_5_chevaux": [
+                {
+                    'numero': p['numero'],
+                    'nom': p['nom'],
+                    'score': p['score'],
+                    'cote': p['cote']
+                }
+                for p in top_5
+            ],
+            "paris_recommandes": paris_recommandes,
+            "budget_total": budget,
+            "analyse_ia": analyse_ia,
             "timestamp": datetime.now().isoformat()
-        }), 200
+        }
+        
+        # Sauvegarder dans historique
+        history_store.append({
+            'date': date_str,
+            'reunion': reunion,
+            'course': course,
+            'hippodrome': race_data['hippodrome'],
+            'timestamp': datetime.now().isoformat()
+        })
+        
+        logger.info("✅ Analyse terminée avec succès")
+        
+        return jsonify(result), 200
     
     except Exception as e:
-        logger.error(f"Gemini test error: {e}")
+        logger.error(f"❌ Erreur analyse: {e}", exc_info=True)
         return jsonify({
-            "status": "error",
-            "message": str(e),
-            "timestamp": datetime.now().isoformat()
+            "error": "Erreur lors de l'analyse",
+            "message": str(e)
         }), 500
 
 
 @app.route('/history')
 def get_history():
-    """
-    Retourne l'historique des analyses.
-    
-    Returns:
-        JSON avec liste des analyses
-    """
+    """Retourne l'historique des analyses."""
     return jsonify({
         "status": "success",
         "count": len(history_store),
         "history": history_store
     }), 200
-
-
-@app.route('/add-test-entry', methods=['POST'])
-def add_test_entry():
-    """
-    Ajoute une entrée de test dans l'historique.
-    
-    Returns:
-        JSON avec confirmation
-    """
-    try:
-        data = request.get_json() or {}
-        
-        entry = {
-            "id": len(history_store) + 1,
-            "timestamp": datetime.now().isoformat(),
-            "type": "test",
-            "data": data
-        }
-        
-        history_store.append(entry)
-        
-        return jsonify({
-            "status": "success",
-            "message": "Entrée ajoutée",
-            "entry": entry
-        }), 201
-    
-    except Exception as e:
-        logger.error(f"Add entry error: {e}")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
 
 
 # ============================================================================
@@ -201,7 +414,7 @@ def not_found(error):
         "status": "error",
         "code": 404,
         "message": "Endpoint introuvable",
-        "available_endpoints": ["/", "/health", "/test-gemini", "/history"]
+        "available_endpoints": ["/", "/health", "/race", "/history"]
     }), 404
 
 
@@ -222,5 +435,5 @@ def internal_error(error):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    logger.info(f"🚀 Démarrage Trot System v8.0 - Minimal sur port {port}")
+    logger.info(f"🚀 Démarrage Trot System v8.0 - Standalone sur port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
