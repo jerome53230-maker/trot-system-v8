@@ -37,10 +37,10 @@ def load_history() -> List[Dict]:
     """Charge l'historique depuis PostgreSQL ou JSON"""
     if USE_POSTGRESQL:
         try:
-            conn = psycopg2.connect(DATABASE_URL)
-            cur = conn.cursor(cursor_factory=RealDictCursor)
+            conn = psycopg.connect(DATABASE_URL)
+            cur = conn.cursor()
             
-            # Créer table si n'existe pas
+            # CrÃ©er table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS history (
                     id SERIAL PRIMARY KEY,
@@ -57,16 +57,14 @@ def load_history() -> List[Dict]:
             """)
             
             cur.execute("SELECT * FROM history ORDER BY timestamp DESC LIMIT 50")
-            history = cur.fetchall()
+            columns = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
             
             conn.commit()
             cur.close()
             conn.close()
             
-            return [dict(row) for row in history]
-        except Exception as e:
-            logger.error(f"Erreur load_history PostgreSQL: {e}")
-            return []
+            return [dict(zip(columns, row)) for row in rows]
     else:
         try:
             if HISTORY_FILE.exists():
