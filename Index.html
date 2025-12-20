@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trot System v8.0</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white min-h-screen p-8">
+    <div class="container mx-auto">
+        <header class="mb-8">
+            <h1 class="text-4xl font-bold mb-2">🏇 Trot System v8.0</h1>
+            <p class="text-gray-400">Analyse des courses hippiques</p>
+        </header>
+        
+        <div class="bg-gray-800 rounded-lg p-6">
+            <h2 class="text-2xl font-bold mb-4">📊 Analyser une course</h2>
+            
+            <form id="analyzeForm" class="space-y-4">
+                <div>
+                    <label class="block mb-2">Date (JJMMAAAA)</label>
+                    <input type="text" id="date" placeholder="18122025" 
+                           class="w-full bg-gray-700 rounded px-4 py-2" required>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block mb-2">Réunion</label>
+                        <input type="number" id="reunion" min="1" max="9" 
+                               class="w-full bg-gray-700 rounded px-4 py-2" required>
+                    </div>
+                    <div>
+                        <label class="block mb-2">Course</label>
+                        <input type="number" id="course" min="1" max="16"
+                               class="w-full bg-gray-700 rounded px-4 py-2" required>
+                    </div>
+                </div>
+                
+                <div>
+                    <label class="block mb-2">Budget (€)</label>
+                    <select id="budget" class="w-full bg-gray-700 rounded px-4 py-2">
+                        <option value="20" selected>20€</option>
+                        <option value="15">15€</option>
+                        <option value="10">10€</option>
+                        <option value="5">5€</option>
+                    </select>
+                </div>
+                
+                <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 rounded py-3 font-bold">
+                    🚀 Analyser
+                </button>
+            </form>
+        </div>
+        
+        <div id="loading" class="hidden mt-8 text-center">
+            <div class="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+            <p class="mt-4">Analyse en cours...</p>
+        </div>
+        
+        <div id="error" class="hidden mt-8 bg-red-900/50 border border-red-500 rounded p-4"></div>
+        
+        <div id="results" class="hidden mt-8 bg-gray-800 rounded-lg p-6"></div>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
+```
+```
+5. Cliquer "Commit new file"
+```
+
+### 2️⃣ Créer `app.js` À LA RACINE
+```
+1. Cliquer "Add file" → "Create new file"
+2. Nom: app.js
+   ⚠️ PAS frontend/app.js
+   ⚠️ JUSTE app.js
+3. Copier ce code ET CHANGER L'URL LIGNE 3:
