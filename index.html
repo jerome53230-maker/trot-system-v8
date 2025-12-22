@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trot System v8.0 - Analyse Hippique</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 28px;
+        }
+
+        .subtitle {
+            color: #718096;
+            margin-bottom: 30px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            color: #4a5568;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        input, select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button {
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .button:disabled {
+            background: #cbd5e0;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .loading {
+            text-align: center;
+            color: #667eea;
+            font-weight: 600;
+            padding: 20px;
+        }
+
+        .error {
+            background: #fed7d7;
+            color: #c53030;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+
+        .results {
+            margin-top: 20px;
+        }
+
+        .result-section {
+            margin-bottom: 25px;
+        }
+
+        .result-title {
+            color: #2d3748;
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .horse-item {
+            background: #f7fafc;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .horse-number {
+            background: #667eea;
+            color: white;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 18px;
+        }
+
+        .horse-info {
+            flex: 1;
+            padding: 0 15px;
+        }
+
+        .horse-name {
+            font-weight: 600;
+            color: #2d3748;
+        }
+
+        .horse-score {
+            color: #718096;
+            font-size: 14px;
+        }
+
+        .bet-item {
+            background: #edf2f7;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+
+        .bet-type {
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+
+        .bet-details {
+            color: #4a5568;
+            font-size: 14px;
+        }
+
+        .ai-analysis {
+            background: #f0fff4;
+            padding: 20px;
+            border-radius: 8px;
+            border-left: 4px solid #48bb78;
+        }
+
+        .ai-text {
+            color: #2d3748;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+
+        .info-badge {
+            display: inline-block;
+            background: #e6fffa;
+            color: #234e52;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Formulaire -->
+        <div class="card">
+            <h1>🏇 Trot System v8.0</h1>
+            <p class="subtitle">Analyse intelligente de courses hippiques</p>
+
+            <form id="analysisForm">
+                <div class="form-group">
+                    <label for="date">Date de la course (JJ/MM/AAAA)</label>
+                    <input type="date" id="date" required>
+                </div>
+
+                <div class="form-group">
+                    <label for="reunion">Réunion (R)</label>
+                    <select id="reunion" required>
+                        <option value="">Choisir...</option>
+                        <option value="1">R1</option>
+                        <option value="2">R2</option>
+                        <option value="3">R3</option>
+                        <option value="4">R4</option>
+                        <option value="5">R5</option>
+                        <option value="6">R6</option>
+                        <option value="7">R7</option>
+                        <option value="8">R8</option>
+                        <option value="9">R9</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="course">Course (C)</label>
+                    <select id="course" required>
+                        <option value="">Choisir...</option>
+                        <option value="1">C1</option>
+                        <option value="2">C2</option>
+                        <option value="3">C3</option>
+                        <option value="4">C4</option>
+                        <option value="5">C5</option>
+                        <option value="6">C6</option>
+                        <option value="7">C7</option>
+                        <option value="8">C8</option>
+                        <option value="9">C9</option>
+                        <option value="10">C10</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="budget">Budget (€)</label>
+                    <select id="budget" required>
+                        <option value="5">5€</option>
+                        <option value="10">10€</option>
+                        <option value="15">15€</option>
+                        <option value="20" selected>20€</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="button" id="submitBtn">
+                    🔍 Analyser la course
+                </button>
+            </form>
+
+            <div id="loading" class="loading" style="display: none;">
+                ⏳ Analyse en cours...
+            </div>
+
+            <div id="error" class="error" style="display: none;"></div>
+        </div>
+
+        <!-- Résultats -->
+        <div id="results" class="results" style="display: none;"></div>
+    </div>
+
+    <script>
+        // Configuration API
+        const API_URL = 'https://trot-system-v8.onrender.com';
+
+        // Éléments DOM
+        const form = document.getElementById('analysisForm');
+        const loading = document.getElementById('loading');
+        const error = document.getElementById('error');
+        const results = document.getElementById('results');
+        const submitBtn = document.getElementById('submitBtn');
+
+        // Date par défaut (aujourd'hui)
+        document.getElementById('date').valueAsDate = new Date();
+
+        // Soumission formulaire
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Récupérer les valeurs
+            const dateInput = document.getElementById('date').value;
+            const reunion = document.getElementById('reunion').value;
+            const course = document.getElementById('course').value;
+            const budget = document.getElementById('budget').value;
+
+            // Convertir date (YYYY-MM-DD → DDMMYYYY)
+            const [year, month, day] = dateInput.split('-');
+            const dateFormatted = `${day}${month}${year}`;
+
+            // Afficher loading
+            loading.style.display = 'block';
+            error.style.display = 'none';
+            results.style.display = 'none';
+            submitBtn.disabled = true;
+
+            try {
+                // Appel API
+                const url = `${API_URL}/race?date=${dateFormatted}&r=${reunion}&c=${course}&budget=${budget}`;
+                console.log('Calling:', url);
+
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    throw new Error(`Erreur ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                console.log('Response:', data);
+
+                // Afficher résultats
+                displayResults(data);
+
+            } catch (err) {
+                console.error('Error:', err);
+                error.textContent = `❌ Erreur: ${err.message}`;
+                error.style.display = 'block';
+            } finally {
+                loading.style.display = 'none';
+                submitBtn.disabled = false;
+            }
+        });
+
+        // Affichage des résultats
+        function displayResults(data) {
+            let html = '';
+
+            // En-tête
+            html += `
+                <div class="card">
+                    <h2 class="result-title">📊 Informations de la course</h2>
+                    <div>
+                        <span class="info-badge">🏟️ ${data.hippodrome}</span>
+                        <span class="info-badge">📏 ${data.distance}m</span>
+                        <span class="info-badge">🐴 ${data.nb_partants} partants</span>
+                    </div>
+                </div>
+            `;
+
+            // Top 5 chevaux
+            html += `
+                <div class="card">
+                    <h2 class="result-title">🏆 Top 5 Chevaux</h2>
+                    ${data.top_5_chevaux.map((horse, index) => `
+                        <div class="horse-item">
+                            <div class="horse-number">${horse.numero}</div>
+                            <div class="horse-info">
+                                <div class="horse-name">${horse.nom}</div>
+                                <div class="horse-score">Score: ${horse.score} | Cote: ${horse.cote}</div>
+                            </div>
+                            <div>${index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : '⭐'}</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+
+            // Paris recommandés
+            html += `
+                <div class="card">
+                    <h2 class="result-title">💰 Paris Recommandés (${data.budget_total}€)</h2>
+                    ${data.paris_recommandes.map(bet => `
+                        <div class="bet-item">
+                            <div class="bet-type">${bet.type}</div>
+                            <div class="bet-details">
+                                🎯 Chevaux: ${bet.chevaux.join('-')} | 
+                                💵 Mise: ${bet.mise}€ | 
+                                📈 ROI attendu: x${bet.roi_attendu}
+                            </div>
+                            <div class="bet-details" style="margin-top: 5px;">
+                                ${bet.justification}
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+
+            // Analyse IA
+            if (data.analyse_ia) {
+                html += `
+                    <div class="card">
+                        <h2 class="result-title">🤖 Analyse IA Gemini</h2>
+                        <div class="ai-analysis">
+                            <div class="ai-text">${data.analyse_ia}</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            results.innerHTML = html;
+            results.style.display = 'block';
+
+            // Scroll vers résultats
+            results.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    </script>
+</body>
+</html>
