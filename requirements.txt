@@ -1,7 +1,6 @@
 # Trot System v8.0 - Requirements COMPLET Standalone
 # Version avec endpoint /race fonctionnel
 # Python 3.11+ (compatible Python 3.13)
-python-3.11.7
 
 # Framework Web
 Flask==3.0.0
