@@ -1,5 +1,4 @@
-# Trot System v8.1 - Requirements
-# Version améliorée avec corrections et optimisations
+# Trot System v8.3 - Requirements avec ML
 # Python 3.11+ (compatible Python 3.13)
 
 # Framework Web
@@ -7,17 +6,45 @@ Flask==3.0.0
 flask-cors==4.0.0
 gunicorn==21.2.0
 
-# HTTP Requests (scraping PMU avec retry)
+# HTTP Requests
 requests==2.31.0
 
-# Google Generative AI (analyse IA avec gestion quota)
+# Google Generative AI
 google-generativeai==0.8.3
 
-# Optional mais recommandé pour production
-# python-dotenv==1.0.0  # Gestion variables d'environnement
-# redis==5.0.1  # Cache distribué (à activer plus tard)
-# psycopg2-binary==2.9.9  # PostgreSQL (à activer plus tard)
-# sentry-sdk[flask]==1.40.0  # Monitoring erreurs (à activer plus tard)
-# PostgreSQL (optionnel Phase 2)
+# PostgreSQL
 psycopg2-binary==2.9.9
-SQLAlchemy==2.0.36
+SQLAlchemy==2.0.23
+
+# Machine Learning (NOUVEAU v8.3)
+scikit-learn==1.3.2  # Random Forest, preprocessing
+xgboost==2.0.3  # XGBoost (recommandé)
+numpy==1.26.2  # Calculs numériques
+pandas==2.1.4  # Data manipulation
+joblib==1.3.2  # Sauvegarde modèles
+
+# Optionnel mais recommandé
+# tensorflow==2.15.0  # Neural Networks (si besoin)
+# lightgbm==4.1.0  # Alternative XGBoost
+# catboost==1.2.2  # Alternative XGBoost
+
+# Backtesting & Analytics
+# matplotlib==3.8.2  # Graphiques
+# seaborn==0.13.0  # Visualisations
+# plotly==5.18.0  # Graphiques interactifs
+
+# API Avancée (Phase 3+)
+# flask-jwt-extended==4.5.3  # JWT auth
+# flask-limiter==3.5.0  # Rate limiting
+# flasgger==0.9.7  # Swagger documentation
+
+# Monitoring (Phase 3+)
+# sentry-sdk[flask]==1.40.0  # Error tracking
+# redis==5.0.1  # Cache avancé
+# celery==5.3.4  # Async tasks
+
+# Development
+# pytest==7.4.3  # Tests
+# pytest-cov==4.1.0  # Coverage
+# black==23.12.1  # Formatting
+# flake8==6.1.0  # Linting
