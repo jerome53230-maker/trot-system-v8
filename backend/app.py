@@ -1,6 +1,6 @@
 """
-Trot System v8.3 FINAL - Backend API Complet
-Toutes corrections appliquées : Flask 3.0, Python 3.11+, Optimisations
+Trot System v8.3 FINAL CORRIGÉ - Backend API Professionnel
+Corrections: Endpoint /participants pour données complètes
 """
 
 from flask import Flask, request, jsonify
@@ -106,35 +106,40 @@ def validate_date(date_str: str) -> bool:
         return False
 
 
-def validate_params(date_str: str, reunion: int, course: int, budget: int) -> Tuple[bool, Optional[str]]:
-    """Valide tous les paramètres."""
+def validate_params(date: str, reunion: int, course: int, budget: int) -> Tuple[bool, str]:
+    """
+    Valide paramètres requête.
+    
+    Returns:
+        (valid, error_message)
+    """
     # Date
-    if not validate_date(date_str):
-        return False, "Date invalide. Format requis: DDMMYYYY"
+    if not validate_date(date):
+        return False, "Date invalide. Format: JJMMAAAA (ex: 22122025)"
     
     # Réunion
     if not isinstance(reunion, int) or reunion < 1 or reunion > 9:
-        return False, "Réunion invalide. Valeur entre 1 et 9"
+        return False, "Réunion doit être entre 1 et 9"
     
     # Course
     if not isinstance(course, int) or course < 1 or course > 16:
-        return False, "Course invalide. Valeur entre 1 et 16"
+        return False, "Course doit être entre 1 et 16"
     
     # Budget
-    valid_budgets = [5, 10, 15, 20]
-    if budget not in valid_budgets:
-        return False, f"Budget invalide. Valeurs acceptées: {valid_budgets}"
+    if budget not in [5, 10, 15, 20]:
+        return False, "Budget doit être 5, 10, 15 ou 20€"
     
-    return True, None
+    return True, ""
 
 
 # ============================================================================
-# SCRAPING PMU
+# API PMU - SCRAPING AVEC ENDPOINT /participants
 # ============================================================================
 
 def scrape_pmu_with_retry(date_str: str, reunion: int, course: int) -> Optional[Dict]:
     """
     Scrape API PMU avec retry automatique.
+    Utilise 2 endpoints: infos course + participants détaillés
     
     Args:
         date_str: Date format DDMMYYYY
@@ -142,7 +147,7 @@ def scrape_pmu_with_retry(date_str: str, reunion: int, course: int) -> Optional[
         course: Numéro course (1-16)
         
     Returns:
-        Données course ou None si échec
+        Données course avec participants ou None si échec
     """
     # Vérifier cache mémoire
     cache_key = f"{date_str}_R{reunion}_C{course}"
@@ -156,35 +161,61 @@ def scrape_pmu_with_retry(date_str: str, reunion: int, course: int) -> Optional[
     # Scraper avec retry
     for attempt in range(MAX_RETRIES):
         try:
-            url = f"{BASE_URL}/programme/{date_str}/R{reunion}/C{course}"
+            # URL 1: Infos course de base
+            url_course = f"{BASE_URL}/programme/{date_str}/R{reunion}/C{course}"
             
-            logger.info(f"🌐 Scraping PMU (tentative {attempt + 1}/{MAX_RETRIES}): {url}")
+            logger.info(f"🌐 Scraping PMU course (tentative {attempt + 1}/{MAX_RETRIES}): {url_course}")
             
-            response = requests.get(url, timeout=config.REQUEST_TIMEOUT)
+            response_course = requests.get(url_course, timeout=config.REQUEST_TIMEOUT)
             
-            if response.status_code == 200:
-                data = response.json()
-                
-                # Valider données
-                if not data or 'programme' not in data:
-                    logger.warning(f"⚠️ Données invalides: {url}")
+            if response_course.status_code != 200:
+                if response_course.status_code == 404:
+                    logger.warning(f"⚠️ Course introuvable (404): {url_course}")
                     return None
-                
-                # Mettre en cache
-                cache_courses[cache_key] = {
-                    'data': data,
-                    'expires_at': datetime.now() + timedelta(seconds=config.CACHE_TTL_PMU)
-                }
-                
-                logger.info(f"✅ Scraping réussi: {cache_key}")
-                return data
+                else:
+                    logger.warning(f"⚠️ Status {response_course.status_code}: {url_course}")
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY)
+                        continue
+                    return None
             
-            elif response.status_code == 404:
-                logger.warning(f"⚠️ Course introuvable (404): {url}")
+            data_course = response_course.json()
+            
+            # Valider données course
+            if not data_course:
+                logger.warning(f"⚠️ Données course vides: {url_course}")
                 return None
             
-            else:
-                logger.warning(f"⚠️ Status {response.status_code}: {url}")
+            # URL 2: Participants (CRITIQUE pour avoir les détails)
+            url_participants = f"{BASE_URL}/programme/{date_str}/R{reunion}/C{course}/participants"
+            
+            logger.info(f"🌐 Scraping PMU participants: {url_participants}")
+            
+            response_participants = requests.get(url_participants, timeout=config.REQUEST_TIMEOUT)
+            
+            if response_participants.status_code != 200:
+                logger.warning(f"⚠️ Participants non disponibles (status {response_participants.status_code})")
+                logger.warning(f"⚠️ Course peut-être terminée ou données pas encore publiées")
+                return None
+            
+            data_participants = response_participants.json()
+            
+            # Fusionner les données
+            data_course['participants'] = data_participants.get('participants', [])
+            
+            if not data_course['participants']:
+                logger.warning(f"⚠️ Liste participants vide")
+                logger.warning(f"⚠️ Course terminée ou données pas disponibles")
+                return None
+            
+            # Mettre en cache
+            cache_courses[cache_key] = {
+                'data': data_course,
+                'expires_at': datetime.now() + timedelta(seconds=config.CACHE_TTL_PMU)
+            }
+            
+            logger.info(f"✅ Scraping réussi: {cache_key} - {len(data_course['participants'])} participants")
+            return data_course
         
         except requests.Timeout:
             logger.warning(f"⏱️ Timeout tentative {attempt + 1}/{MAX_RETRIES}")
@@ -202,85 +233,47 @@ def scrape_pmu_with_retry(date_str: str, reunion: int, course: int) -> Optional[
 
 def parse_course_data(data: Dict) -> Optional[Dict]:
     """
-    Parse données course PMU.
+    Parse données course PMU avec endpoint /participants.
     
     Args:
-        data: Réponse API PMU
+        data: Réponse API PMU fusionnée (course + participants)
         
     Returns:
         Données formatées ou None
     """
     try:
-        # CORRECTION: L'API retourne directement la course OU un programme
-        # Gérer les deux structures possibles
+        # La course retourne directement les infos
+        # participants vient de l'endpoint /participants
         
-        # Structure 1: API retourne directement la course (URL /RX/CX)
-        if 'libelle' in data and 'participants' in data:
-            course = data
-            hippodrome_data = data.get('hippodrome', {})
-            
-            parsed = {
-                'date': '',  # Pas dans cette structure
-                'reunion': int(data.get('numReunion', 0)),
-                'course': int(data.get('numOrdre', 0)),
-                'hippodrome': hippodrome_data.get('libelleLong', 'INCONNU'),
-                'discipline': data.get('specialite', 'TROT'),
-                'distance': int(data.get('distance', 0)),
-                'monte': data.get('specialite', 'ATTELE'),
-                'conditions': data.get('conditions', ''),
-                'prix': int(data.get('montantPrix', 0)),
-                'nb_partants': int(data.get('nombreDeclaresPartants', 0)),
-                'partants': []
-            }
+        hippodrome_data = data.get('hippodrome', {})
         
-        # Structure 2: API retourne programme avec réunions (URL /JJMMAAAA)
-        elif 'programme' in data:
-            programme = data.get('programme', {})
-            reunions = programme.get('reunions', [])
-            
-            if not reunions:
-                logger.error("❌ Aucune réunion dans les données")
-                return None
-            
-            reunion = reunions[0]
-            courses = reunion.get('courses', [])
-            
-            if not courses:
-                logger.error("❌ Aucune course dans la réunion")
-                return None
-            
-            course = courses[0]
-            
-            parsed = {
-                'date': programme.get('date', ''),
-                'reunion': reunion.get('numOfficiel', 0),
-                'course': course.get('numOrdre', 0),
-                'hippodrome': reunion.get('hippodrome', {}).get('libelleLong', 'INCONNU'),
-                'discipline': course.get('libelleDiscipline', 'TROT'),
-                'distance': int(course.get('distance', 0)),
-                'monte': course.get('libelleMonte', 'ATTELE'),
-                'conditions': course.get('conditions', ''),
-                'prix': int(course.get('montantPrix', 0)),
-                'nb_partants': len(course.get('participants', [])),
-                'partants': []
-            }
+        parsed = {
+            'date': '',  # Pas dans cette structure
+            'reunion': int(data.get('numReunion', 0)),
+            'course': int(data.get('numOrdre', 0)),
+            'hippodrome': hippodrome_data.get('libelleLong', 'INCONNU'),
+            'discipline': data.get('specialite', 'TROT'),
+            'distance': int(data.get('distance', 0)),
+            'monte': data.get('specialite', 'ATTELE'),
+            'conditions': data.get('conditions', ''),
+            'prix': int(data.get('montantPrix', 0)),
+            'nb_partants': int(data.get('nombreDeclaresPartants', 0)),
+            'partants': []
+        }
         
-        else:
-            logger.error("❌ Structure JSON non reconnue")
-            return None
+        # Extraire partants (structure endpoint /participants)
+        participants = data.get('participants', [])
         
-        # Extraire partants (même logique pour les 2 structures)
-        participants = course.get('participants', [])
-        
-        # Si participants est vide mais nombreDeclaresPartants > 0
-        # C'est une course déjà terminée sans détails partants
-        if not participants and parsed.get('nb_partants', 0) > 0:
-            logger.warning(f"⚠️ Course terminée sans détails partants disponibles")
-            logger.warning(f"⚠️ Impossible d'analyser une course passée sans données partants")
+        if not participants:
+            logger.error("❌ Aucun partant dans les données")
             return None
         
         for p in participants:
             try:
+                # Structure de l'endpoint /participants
+                gains_data = p.get('gainsParticipant', {})
+                rapport_direct = p.get('dernierRapportDirect', {})
+                
                 partant = {
                     'numero': int(p.get('numPmu', 0)),
                     'nom': str(p.get('nom', '')),
@@ -293,19 +286,19 @@ def parse_course_data(data: Dict) -> Optional[Dict]:
                     'nb_courses': int(p.get('nombreCourses', 0)),
                     'nb_victoires': int(p.get('nombreVictoires', 0)),
                     'nb_places': int(p.get('nombrePlaces', 0)),
-                    'gains': int(p.get('gainsCarriere', 0)),
-                    'cote': float(p.get('rapport', {}).get('direct', {}).get('rapportDirect', 0.0)),
-                    'deferre': bool(p.get('deferre', False)),
-                    'oeilleres': bool(p.get('oeilleres', False))
+                    'gains': int(gains_data.get('gainsCarriere', 0)),
+                    'cote': float(rapport_direct.get('rapport', 0.0)),
+                    'deferre': 'DEFERRE' in str(p.get('deferre', '')).upper(),
+                    'oeilleres': 'AVEC' in str(p.get('oeilleres', '')).upper()
                 }
                 parsed['partants'].append(partant)
             
             except Exception as e:
-                logger.warning(f"⚠️ Erreur parsing partant: {e}")
+                logger.warning(f"⚠️ Erreur parsing partant {p.get('numPmu', '?')}: {e}")
                 continue
         
         if not parsed['partants']:
-            logger.error("❌ Aucun partant valide")
+            logger.error("❌ Aucun partant valide après parsing")
             return None
         
         logger.info(f"✅ Course parsée: {len(parsed['partants'])} partants")
@@ -313,222 +306,250 @@ def parse_course_data(data: Dict) -> Optional[Dict]:
     
     except Exception as e:
         logger.error(f"❌ Erreur parse_course_data: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
 
 
 # ============================================================================
-# SCORING
+# SCORING 7 FACTEURS
 # ============================================================================
 
-def calculer_score_cheval(partant: Dict, course_data: Dict) -> float:
+def calculer_score_cheval(cheval: Dict, all_chevaux: List[Dict]) -> float:
     """
-    Calcule score d'un cheval (système 7 facteurs).
+    Score sophistiqué 7 facteurs.
     
-    Args:
-        partant: Données du cheval
-        course_data: Données de la course
-        
+    Facteurs:
+    1. Musique (35%) - Forme récente
+    2. Taux victoire (15%) - Régularité gagne
+    3. Taux places (15%) - Régularité places
+    4. Gains carrière (10%) - Niveau général
+    5. Cote (15%) - Confiance public
+    6. Driver (5%) - Qualité pilote
+    7. Déferre/Oeillères (5%) - Équipement
+    
     Returns:
-        Score entre 0 et 100
+        Score 0-100
     """
-    try:
-        score = 0.0
-        
-        # 1. Ratio victoires (20 points max)
-        nb_courses = partant.get('nb_courses', 0)
-        nb_victoires = partant.get('nb_victoires', 0)
-        if nb_courses > 0:
-            ratio_victoires = nb_victoires / nb_courses
-            score += ratio_victoires * 20
-        
-        # 2. Ratio places (15 points max)
-        nb_places = partant.get('nb_places', 0)
-        if nb_courses > 0:
-            ratio_places = nb_places / nb_courses
-            score += ratio_places * 15
-        
-        # 3. Gains moyens (15 points max)
-        gains = partant.get('gains', 0)
-        if nb_courses > 0 and gains > 0:
-            gains_moyen = gains / nb_courses
-            # Normaliser (max 50000€ par course)
-            score += min(gains_moyen / 50000, 1.0) * 15
-        
-        # 4. Forme récente via musique (20 points max)
-        musique = partant.get('musique', '')
-        if musique:
-            # Prendre 5 dernières courses
-            recent = musique[:5] if len(musique) >= 5 else musique
-            forme = 0
-            for position in recent:
-                if position.isdigit():
-                    pos = int(position)
-                    if pos == 1:
-                        forme += 5
-                    elif pos == 2:
-                        forme += 3
-                    elif pos == 3:
-                        forme += 2
-                    elif pos <= 5:
-                        forme += 1
-            # Normaliser sur 20
-            score += min(forme / 25 * 20, 20)
-        
-        # 5. Expérience (10 points max)
-        # Optimal: 20-50 courses
-        if nb_courses >= 20:
-            experience = min(nb_courses / 50, 1.0) * 10
-            score += experience
-        
-        # 6. Âge optimal (10 points max)
-        # Optimal: 4-6 ans
-        age = partant.get('age', 0)
-        if 4 <= age <= 6:
-            score += 10
-        elif 3 <= age <= 7:
-            score += 5
-        
-        # 7. Équipement (10 points max)
-        if partant.get('deferre', False):
-            score += 5
-        if partant.get('oeilleres', False):
-            score += 5
-        
-        # Normaliser sur 100
-        score = min(score, 100.0)
-        
-        return round(score, 2)
+    score = 0.0
     
-    except Exception as e:
-        logger.error(f"❌ Erreur calcul score: {e}")
-        return 0.0
+    # 1. MUSIQUE (35 points)
+    musique = cheval.get('musique', '')
+    if musique:
+        notes_musique = []
+        for char in musique[:6]:  # 6 dernières courses
+            if char.isdigit():
+                pos = int(char)
+                if pos == 1:
+                    notes_musique.append(10)
+                elif pos == 2:
+                    notes_musique.append(7)
+                elif pos == 3:
+                    notes_musique.append(5)
+                elif pos <= 5:
+                    notes_musique.append(3)
+                else:
+                    notes_musique.append(1)
+            elif char.lower() == 'a':
+                notes_musique.append(8)  # Arrivé (bonne perf)
+            elif char.lower() == 'd':
+                notes_musique.append(0)  # Disqualifié
+            elif char.lower() == 'm':
+                notes_musique.append(2)  # Monté (moins bon)
+        
+        if notes_musique:
+            # Pondération: courses récentes = plus important
+            weights = [0.35, 0.25, 0.20, 0.10, 0.07, 0.03]
+            weighted_score = sum(n * w for n, w in zip(notes_musique, weights[:len(notes_musique)]))
+            score += weighted_score * 3.5  # Sur 35 points
+    
+    # 2. TAUX VICTOIRE (15 points)
+    nb_courses = cheval.get('nb_courses', 0)
+    nb_victoires = cheval.get('nb_victoires', 0)
+    if nb_courses > 0:
+        taux_victoire = nb_victoires / nb_courses
+        score += taux_victoire * 15
+    
+    # 3. TAUX PLACES (15 points)
+    nb_places = cheval.get('nb_places', 0)
+    if nb_courses > 0:
+        taux_places = nb_places / nb_courses
+        score += taux_places * 15
+    
+    # 4. GAINS CARRIÈRE (10 points)
+    gains = cheval.get('gains', 0)
+    if gains > 0 and all_chevaux:
+        gains_max = max((c.get('gains', 0) for c in all_chevaux), default=1)
+        if gains_max > 0:
+            score += (gains / gains_max) * 10
+    
+    # 5. COTE (15 points) - Plus faible = mieux
+    cote = cheval.get('cote', 999)
+    if cote > 0 and cote < 100:
+        # Normalisation: cote 2 = 15pts, cote 50 = 3pts
+        score_cote = max(0, 15 - (cote - 2) * 0.4)
+        score += max(3, min(15, score_cote))
+    elif cote == 0:
+        score += 7  # Cote non dispo
+    
+    # 6. DRIVER (5 points)
+    driver = cheval.get('driver', '').upper()
+    # Drivers top: basé sur stats PMU générales
+    top_drivers = ['RAFFIN', 'ABRIVARD', 'NIVARD', 'THOMAIN', 'VERVA', 'BARRIER', 'ROCHARD']
+    if any(top in driver for top in top_drivers):
+        score += 5
+    else:
+        score += 2  # Driver standard
+    
+    # 7. ÉQUIPEMENT (5 points)
+    if cheval.get('deferre', False):
+        score += 3  # Déferré = souvent mieux
+    if cheval.get('oeilleres', False):
+        score += 2  # Oeillères = focus
+    
+    # Normaliser sur 100
+    return min(100, max(0, score))
 
 
-def scorer_tous_partants(course_data: Dict) -> List[Dict]:
+def scorer_tous_partants(partants: List[Dict]) -> List[Dict]:
     """
     Score tous les partants et les trie.
     
-    Args:
-        course_data: Données de la course
-        
     Returns:
-        Liste partants avec scores, triés
+        Liste triée par score décroissant
     """
-    try:
-        partants = course_data.get('partants', [])
-        
-        if not partants:
-            logger.error("❌ Aucun partant à scorer")
-            return []
-        
-        # Calculer scores
-        for partant in partants:
-            score = calculer_score_cheval(partant, course_data)
-            partant['score'] = score
-        
-        # Trier par score décroissant
-        partants.sort(key=lambda x: x.get('score', 0), reverse=True)
-        
-        logger.info(f"✅ {len(partants)} chevaux scorés")
-        
-        return partants
+    for cheval in partants:
+        cheval['score'] = calculer_score_cheval(cheval, partants)
     
-    except Exception as e:
-        logger.error(f"❌ Erreur scorer_tous_partants: {e}")
-        return []
+    # Trier par score décroissant
+    partants_scores = sorted(partants, key=lambda x: x['score'], reverse=True)
+    
+    return partants_scores
 
 
 # ============================================================================
-# PARIS RECOMMANDÉS
+# GÉNÉRATION PARIS
 # ============================================================================
 
-def generer_paris(top_chevaux: List[Dict], budget: int) -> List[Dict]:
+def generer_paris(top_chevaux: List[Dict], budget: int) -> Dict:
     """
-    Génère recommandations de paris selon budget.
+    Génère paris recommandés selon budget.
     
     Args:
-        top_chevaux: Top 5 chevaux
-        budget: Budget disponible (5, 10, 15, 20)
+        top_chevaux: Top 5 chevaux triés
+        budget: Budget total (5/10/15/20€)
         
     Returns:
-        Liste de paris recommandés
+        Dict avec paris recommandés
     """
-    try:
-        if not top_chevaux or len(top_chevaux) < 3:
-            logger.warning("⚠️ Pas assez de chevaux pour paris")
-            return []
-        
-        paris = []
-        
-        if budget >= 5:
-            # Simple Gagnant
-            paris.append({
-                'type': 'SIMPLE_GAGNANT',
-                'chevaux': [top_chevaux[0]['numero']],
-                'mise': 3,
-                'gain_estime': round(top_chevaux[0].get('cote', 2.0) * 3, 2)
-            })
-            
-            # Simple Placé
-            paris.append({
-                'type': 'SIMPLE_PLACE',
-                'chevaux': [top_chevaux[0]['numero']],
-                'mise': 2,
-                'gain_estime': round(top_chevaux[0].get('cote', 2.0) * 0.4 * 2, 2)
-            })
-        
-        if budget >= 10:
-            # Couplé Gagnant
-            if len(top_chevaux) >= 2:
-                paris.append({
-                    'type': 'COUPLE_GAGNANT',
-                    'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero']],
-                    'mise': 4,
-                    'gain_estime': round((top_chevaux[0].get('cote', 2.0) + top_chevaux[1].get('cote', 2.0)) * 2, 2)
-                })
-            
-            # Simple Placé sécurité
-            if len(top_chevaux) >= 2:
-                paris.append({
-                    'type': 'SIMPLE_PLACE',
-                    'chevaux': [top_chevaux[1]['numero']],
-                    'mise': 1,
-                    'gain_estime': round(top_chevaux[1].get('cote', 2.0) * 0.4 * 1, 2)
-                })
-        
-        if budget >= 15:
-            # Trio
-            if len(top_chevaux) >= 3:
-                paris.append({
-                    'type': 'TRIO',
-                    'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero'], top_chevaux[2]['numero']],
-                    'mise': 5,
-                    'gain_estime': round(sum(c.get('cote', 2.0) for c in top_chevaux[:3]) * 3, 2)
-                })
-        
-        if budget >= 20:
-            # Quarté
-            if len(top_chevaux) >= 4:
-                paris.append({
-                    'type': 'QUARTE',
-                    'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero'], 
-                               top_chevaux[2]['numero'], top_chevaux[3]['numero']],
-                    'mise': 5,
-                    'gain_estime': round(sum(c.get('cote', 2.0) for c in top_chevaux[:4]) * 5, 2)
-                })
-        
-        # Calculer ROI estimé
-        total_mise = sum(p['mise'] for p in paris)
-        total_gain = sum(p['gain_estime'] for p in paris)
-        roi = round((total_gain - total_mise) / total_mise * 100, 2) if total_mise > 0 else 0
-        
-        logger.info(f"✅ {len(paris)} paris générés, ROI estimé: {roi}%")
-        
-        return paris
+    paris = []
     
-    except Exception as e:
-        logger.error(f"❌ Erreur generer_paris: {e}")
-        return []
+    if budget == 5:
+        # Budget minimal: focus gagnant
+        paris.append({
+            'type': 'SIMPLE_GAGNANT',
+            'chevaux': [top_chevaux[0]['numero']],
+            'mise': 3,
+            'gain_estime': round(top_chevaux[0]['cote'] * 3, 2)
+        })
+        paris.append({
+            'type': 'SIMPLE_PLACE',
+            'chevaux': [top_chevaux[0]['numero']],
+            'mise': 2,
+            'gain_estime': round(top_chevaux[0]['cote'] * 0.4 * 2, 2)
+        })
+    
+    elif budget == 10:
+        # Budget moyen: gagnant + placé + couplé
+        paris.append({
+            'type': 'SIMPLE_GAGNANT',
+            'chevaux': [top_chevaux[0]['numero']],
+            'mise': 4,
+            'gain_estime': round(top_chevaux[0]['cote'] * 4, 2)
+        })
+        paris.append({
+            'type': 'SIMPLE_PLACE',
+            'chevaux': [top_chevaux[0]['numero']],
+            'mise': 3,
+            'gain_estime': round(top_chevaux[0]['cote'] * 0.4 * 3, 2)
+        })
+        paris.append({
+            'type': 'COUPLE_GAGNANT',
+            'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero']],
+            'mise': 3,
+            'gain_estime': round(top_chevaux[0]['cote'] * top_chevaux[1]['cote'] * 0.7 * 3, 2)
+        })
+    
+    elif budget == 15:
+        # Budget confortable: diversification
+        paris.append({
+            'type': 'SIMPLE_GAGNANT',
+            'chevaux': [top_chevaux[0]['numero']],
+            'mise': 5,
+            'gain_estime': round(top_chevaux[0]['cote'] * 5, 2)
+        })
+        paris.append({
+            'type': 'COUPLE_GAGNANT',
+            'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero']],
+            'mise': 4,
+            'gain_estime': round(top_chevaux[0]['cote'] * top_chevaux[1]['cote'] * 0.7 * 4, 2)
+        })
+        paris.append({
+            'type': 'COUPLE_PLACE',
+            'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero']],
+            'mise': 3,
+            'gain_estime': round(top_chevaux[0]['cote'] * top_chevaux[1]['cote'] * 0.3 * 3, 2)
+        })
+        paris.append({
+            'type': 'TRIO',
+            'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero'], top_chevaux[2]['numero']],
+            'mise': 3,
+            'gain_estime': round(top_chevaux[0]['cote'] * top_chevaux[1]['cote'] * top_chevaux[2]['cote'] * 0.5 * 3, 2)
+        })
+    
+    else:  # budget == 20
+        # Budget max: stratégie complète
+        paris.append({
+            'type': 'SIMPLE_GAGNANT',
+            'chevaux': [top_chevaux[0]['numero']],
+            'mise': 5,
+            'gain_estime': round(top_chevaux[0]['cote'] * 5, 2)
+        })
+        paris.append({
+            'type': 'SIMPLE_PLACE',
+            'chevaux': [top_chevaux[0]['numero']],
+            'mise': 3,
+            'gain_estime': round(top_chevaux[0]['cote'] * 0.4 * 3, 2)
+        })
+        paris.append({
+            'type': 'COUPLE_GAGNANT',
+            'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero']],
+            'mise': 4,
+            'gain_estime': round(top_chevaux[0]['cote'] * top_chevaux[1]['cote'] * 0.7 * 4, 2)
+        })
+        paris.append({
+            'type': 'TRIO',
+            'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero'], top_chevaux[2]['numero']],
+            'mise': 4,
+            'gain_estime': round(top_chevaux[0]['cote'] * top_chevaux[1]['cote'] * top_chevaux[2]['cote'] * 0.5 * 4, 2)
+        })
+        paris.append({
+            'type': 'MULTI',
+            'chevaux': [c['numero'] for c in top_chevaux[:4]],
+            'mise': 4,
+            'gain_estime': round(sum(c['cote'] for c in top_chevaux[:4]) * 2, 2)
+        })
+    
+    total_mise = sum(p['mise'] for p in paris)
+    gain_estime_total = sum(p['gain_estime'] for p in paris)
+    roi_estime = round(((gain_estime_total - total_mise) / total_mise) * 100, 2) if total_mise > 0 else 0
+    
+    return {
+        'paris': paris,
+        'total_mise': total_mise,
+        'gain_estime_total': round(gain_estime_total, 2),
+        'roi_estime': roi_estime
+    }
 
 
 # ============================================================================
@@ -537,399 +558,270 @@ def generer_paris(top_chevaux: List[Dict], budget: int) -> List[Dict]:
 
 def analyser_avec_gemini(course_data: Dict, top_chevaux: List[Dict]) -> str:
     """
-    Analyse course avec Gemini AI.
+    Analyse avec Gemini AI.
     
     Args:
-        course_data: Données de la course
+        course_data: Données course
         top_chevaux: Top 5 chevaux
         
     Returns:
         Analyse textuelle ou message d'erreur
     """
     if not GEMINI_API_KEY:
-        logger.warning("⚠️ GEMINI_API_KEY non configurée")
         return "Analyse IA non disponible (clé API manquante)"
     
+    # Vérifier cache
+    cache_key = f"gemini_{course_data['hippodrome']}_{course_data['course']}"
+    if cache_key in cache_gemini:
+        cached = cache_gemini[cache_key]
+        if cached.get('expires_at', datetime.now()) > datetime.now():
+            logger.info(f"📦 Cache Gemini hit: {cache_key}")
+            return cached['data']
+    
     try:
-        # Cache key
-        cache_key = f"{course_data['date']}_R{course_data['reunion']}_C{course_data['course']}"
-        
-        # Vérifier cache
-        if cache_key in cache_gemini:
-            cached = cache_gemini[cache_key]
-            if cached.get('expires_at', datetime.now()) > datetime.now():
-                logger.info(f"📦 Cache Gemini hit: {cache_key}")
-                return cached['analyse']
-        
         # Préparer prompt
-        top_5_text = "\n".join([
-            f"{i+1}. #{c['numero']} {c['nom']} - Score: {c['score']}/100, "
-            f"Cote: {c['cote']}, Driver: {c['driver']}"
-            for i, c in enumerate(top_chevaux[:5])
+        chevaux_info = "\n".join([
+            f"{i+1}. #{c['numero']} {c['nom']} - Score: {c['score']:.1f}/100 - Cote: {c['cote']} - Driver: {c['driver']} - Musique: {c['musique']}"
+            for i, c in enumerate(top_chevaux)
         ])
         
-        prompt = f"""Analyse cette course hippique du {course_data['date']} :
+        prompt = f"""Analyse cette course de trot:
 
 Hippodrome: {course_data['hippodrome']}
+Course: R{course_data['reunion']}C{course_data['course']}
 Distance: {course_data['distance']}m
+Discipline: {course_data['discipline']}
 {course_data['nb_partants']} partants
 
-TOP 5 CHEVAUX (selon notre algorithme) :
-{top_5_text}
+Top 5 chevaux (par score):
+{chevaux_info}
 
-Donne une analyse COURTE (3-4 phrases max) avec :
-1. Le favori logique
-2. Un outsider intéressant
-3. Un conseil de pari
+Fais une analyse concise (150 mots max) incluant:
+1. Favori logique et pourquoi
+2. Outsider à surveiller
+3. Configuration de course
+4. Conseil de jeu final
 
-Reste concis et pratique."""
-        
-        # Appeler Gemini
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+Sois direct, professionnel, et pertinent."""
+
+        # Appel Gemini
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
         
         headers = {'Content-Type': 'application/json'}
         
         payload = {
             'contents': [{
                 'parts': [{'text': prompt}]
-            }]
+            }],
+            'generationConfig': {
+                'temperature': 0.7,
+                'maxOutputTokens': 300
+            }
         }
         
-        response = requests.post(
-            f"{url}?key={GEMINI_API_KEY}",
-            headers=headers,
-            json=payload,
-            timeout=config.REQUEST_TIMEOUT
-        )
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
         
         if response.status_code == 200:
-            result = response.json()
+            data = response.json()
+            analyse = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
             
-            # Extraire texte
-            candidates = result.get('candidates', [])
-            if candidates:
-                content = candidates[0].get('content', {})
-                parts = content.get('parts', [])
-                if parts:
-                    analyse = parts[0].get('text', '')
-                    
-                    # Mettre en cache
-                    cache_gemini[cache_key] = {
-                        'analyse': analyse,
-                        'expires_at': datetime.now() + timedelta(seconds=config.CACHE_TTL_GEMINI)
-                    }
-                    
-                    logger.info(f"✅ Analyse Gemini générée: {len(analyse)} caractères")
-                    return analyse
-        
-        # Erreur API
-        logger.warning(f"⚠️ Gemini API status {response.status_code}")
-        return "Analyse IA temporairement indisponible"
+            # Mettre en cache
+            cache_gemini[cache_key] = {
+                'data': analyse,
+                'expires_at': datetime.now() + timedelta(seconds=config.CACHE_TTL_GEMINI)
+            }
+            
+            logger.info(f"✅ Analyse Gemini générée")
+            return analyse
+        else:
+            logger.warning(f"⚠️ Gemini erreur status {response.status_code}")
+            return "Analyse IA non disponible (erreur API)"
     
     except Exception as e:
         logger.error(f"❌ Erreur Gemini: {e}")
-        return "Analyse IA non disponible"
+        return "Analyse IA non disponible (erreur technique)"
 
 
 # ============================================================================
-# ROUTES API
+# ROUTES FLASK
 # ============================================================================
 
-@app.route('/')
-def index():
-    """Page d'accueil."""
+@app.route('/', methods=['GET'])
+def home():
+    """Page d'accueil API."""
     return jsonify({
-        "name": "Trot System v8.3 FINAL",
-        "version": "8.3",
-        "status": "operational",
-        "endpoints": {
-            "health": "/health",
-            "race": "/race?date=DDMMYYYY&r=1-9&c=1-16&budget=5|10|15|20",
-            "stats": "/stats" if HAS_DATABASE else None
+        'name': 'Trot System v8.3 FINAL CORRIGÉ',
+        'version': '8.3',
+        'status': 'operational',
+        'endpoints': {
+            'health': '/health',
+            'race': '/race?date=DDMMYYYY&r=1-9&c=1-16&budget=5|10|15|20'
         },
-        "features": [
-            "Scraping PMU",
-            "Scoring 7 facteurs",
-            "Gemini IA",
-            "Paris optimisés",
-            "PostgreSQL" if HAS_DATABASE else "Sans DB"
+        'features': [
+            'Scraping PMU avec endpoint /participants',
+            'Scoring 7 facteurs',
+            'Gemini IA',
+            'Paris optimisés',
+            'Cache intelligent'
         ]
     })
 
 
-@app.route('/health')
+@app.route('/health', methods=['GET'])
 def health():
     """Health check."""
-    status = {
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "components": {
-            "api": "ok",
-            "gemini_configured": "yes" if GEMINI_API_KEY else "no",
-            "database": "connected" if HAS_DATABASE and test_connection() else "not configured"
+    clean_cache()  # Nettoyer cache périodiquement
+    
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'components': {
+            'api': 'ok',
+            'gemini_configured': 'yes' if GEMINI_API_KEY else 'no',
+            'database': 'configured' if HAS_DATABASE else 'not configured'
         },
-        "cache": {
-            "courses": len(cache_courses),
-            "gemini": len(cache_gemini)
+        'cache': {
+            'courses': len(cache_courses),
+            'gemini': len(cache_gemini)
         }
-    }
-    
-    return jsonify(status)
+    })
 
 
-@app.route('/race')
-def analyser_course():
+@app.route('/race', methods=['GET'])
+def analyze_race():
     """
-    Analyse une course hippique.
+    Analyse une course.
     
-    Query params:
-        - date: DDMMYYYY
-        - r: Numéro réunion (1-9)
-        - c: Numéro course (1-16)
-        - budget: Budget (5, 10, 15, 20) - défaut 20
+    Params:
+        date (str): Date JJMMAAAA (ex: 22122025)
+        r (int): Réunion 1-9
+        c (int): Course 1-16
+        budget (int, optional): Budget 5/10/15/20€ (défaut: 20)
     """
     try:
         # Récupérer paramètres
-        date_str = request.args.get('date', '').strip()
-        reunion_str = request.args.get('r', '').strip()
-        course_str = request.args.get('c', '').strip()
-        budget_str = request.args.get('budget', '20').strip()
+        date = request.args.get('date', '')
+        reunion = request.args.get('r', type=int, default=0)
+        course = request.args.get('c', type=int, default=0)
+        budget = request.args.get('budget', type=int, default=20)
         
-        # Convertir
-        try:
-            reunion = int(reunion_str)
-            course = int(course_str)
-            budget = int(budget_str)
-        except ValueError:
+        logger.info(f"🏁 Analyse demandée: {date} R{reunion}C{course} Budget: {budget}€")
+        
+        # Valider params
+        valid, error_msg = validate_params(date, reunion, course, budget)
+        if not valid:
             return jsonify({
-                "success": False,
-                "error": "Paramètres invalides. Format: date=DDMMYYYY&r=1&c=1&budget=20"
+                'success': False,
+                'error': error_msg
             }), 400
         
-        # Valider
-        is_valid, error_msg = validate_params(date_str, reunion, course, budget)
-        if not is_valid:
+        # Scraper PMU (avec endpoint /participants)
+        data_raw = scrape_pmu_with_retry(date, reunion, course)
+        
+        if not data_raw:
             return jsonify({
-                "success": False,
-                "error": error_msg
-            }), 400
-        
-        logger.info(f"🏁 Analyse demandée: {date_str} R{reunion}C{course} Budget: {budget}€")
-        
-        # Nettoyer cache
-        clean_cache()
-        
-        # Scraper PMU
-        data = scrape_pmu_with_retry(date_str, reunion, course)
-        
-        if not data:
-            return jsonify({
-                "success": False,
-                "error": "Course introuvable. Vérifiez la date, réunion et numéro de course."
+                'success': False,
+                'error': 'Course introuvable. Vérifiez la date, réunion et numéro de course.'
             }), 404
         
         # Parser données
-        course_data = parse_course_data(data)
+        data_parsed = parse_course_data(data_raw)
         
-        if not course_data:
+        if not data_parsed:
             return jsonify({
-                "success": False,
-                "error": "Impossible de parser les données de la course."
+                'success': False,
+                'error': 'Erreur parsing données course.'
             }), 500
         
         # Scorer chevaux
-        partants_scores = scorer_tous_partants(course_data)
-        
-        if not partants_scores:
-            return jsonify({
-                "success": False,
-                "error": "Impossible de calculer les scores."
-            }), 500
-        
-        # Top 5
+        partants_scores = scorer_tous_partants(data_parsed['partants'])
         top_5 = partants_scores[:5]
         
         # Générer paris
-        paris = generer_paris(top_5, budget)
+        paris_data = generer_paris(top_5, budget)
         
         # Analyse Gemini
-        analyse_ia = analyser_avec_gemini(course_data, top_5)
+        analyse_ia = analyser_avec_gemini(data_parsed, top_5)
         
-        # Sauvegarder en DB si disponible
-        if HAS_DATABASE:
-            try:
-                with get_db() as db:
-                    analyse = Analyse(
-                        date_course=date_str,
-                        reunion=reunion,
-                        course=course,
-                        hippodrome=course_data['hippodrome'],
-                        discipline=course_data['discipline'],
-                        distance=course_data['distance'],
-                        nb_partants=course_data['nb_partants'],
-                        top_5=[{
-                            'numero': c['numero'],
-                            'nom': c['nom'],
-                            'score': c['score'],
-                            'cote': c['cote']
-                        } for c in top_5],
-                        paris_recommandes=paris,
-                        budget=budget,
-                        roi_attendu=sum(p['gain_estime'] for p in paris) - budget,
-                        analyse_ia=analyse_ia,
-                        version='8.3'
-                    )
-                    db.add(analyse)
-                    db.commit()
-                    logger.info("✅ Analyse sauvegardée en DB")
-            except Exception as e:
-                logger.error(f"⚠️ Erreur sauvegarde DB: {e}")
-        
-        # Réponse
-        response = {
-            "success": True,
-            "course": {
-                "date": course_data['date'],
-                "reunion": course_data['reunion'],
-                "course": course_data['course'],
-                "hippodrome": course_data['hippodrome'],
-                "discipline": course_data['discipline'],
-                "distance": course_data['distance'],
-                "nb_partants": course_data['nb_partants']
+        # Résultat
+        result = {
+            'success': True,
+            'course': {
+                'date': date,
+                'reunion': reunion,
+                'course': course,
+                'hippodrome': data_parsed['hippodrome'],
+                'discipline': data_parsed['discipline'],
+                'distance': data_parsed['distance'],
+                'nb_partants': data_parsed['nb_partants']
             },
-            "top_5_chevaux": [{
-                "position": i + 1,
-                "numero": c['numero'],
-                "nom": c['nom'],
-                "score": c['score'],
-                "cote": c['cote'],
-                "driver": c['driver'],
-                "musique": c['musique']
-            } for i, c in enumerate(top_5)],
-            "paris_recommandes": paris,
-            "budget_total": budget,
-            "total_mise": sum(p['mise'] for p in paris),
-            "gain_estime_total": sum(p['gain_estime'] for p in paris),
-            "roi_estime": round((sum(p['gain_estime'] for p in paris) - sum(p['mise'] for p in paris)) / sum(p['mise'] for p in paris) * 100, 2) if paris else 0,
-            "analyse_ia": analyse_ia,
-            "timestamp": datetime.now().isoformat()
+            'top_5_chevaux': [
+                {
+                    'position': i + 1,
+                    'numero': c['numero'],
+                    'nom': c['nom'],
+                    'score': round(c['score'], 2),
+                    'cote': c['cote'],
+                    'driver': c['driver'],
+                    'musique': c['musique'],
+                    'nb_victoires': c['nb_victoires'],
+                    'nb_courses': c['nb_courses']
+                }
+                for i, c in enumerate(top_5)
+            ],
+            'paris_recommandes': paris_data['paris'],
+            'total_mise': paris_data['total_mise'],
+            'gain_estime_total': paris_data['gain_estime_total'],
+            'roi_estime': paris_data['roi_estime'],
+            'analyse_ia': analyse_ia
         }
         
-        logger.info(f"✅ Analyse terminée: Top={top_5[0]['numero']} Score={top_5[0]['score']}")
+        logger.info(f"✅ Analyse terminée: {date} R{reunion}C{course}")
         
-        return jsonify(response)
+        return jsonify(result)
     
     except Exception as e:
-        logger.error(f"❌ Erreur /race: {e}", exc_info=True)
+        logger.error(f"❌ Erreur /race: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({
-            "success": False,
-            "error": f"Erreur serveur: {str(e)}"
+            'success': False,
+            'error': f'Erreur serveur: {str(e)}'
         }), 500
-
-
-# Routes Database (si disponible)
-if HAS_DATABASE:
-    
-    @app.route('/stats')
-    def get_stats():
-        """Statistiques système."""
-        try:
-            stats = get_db_stats()
-            return jsonify({
-                "success": True,
-                "statistics": stats
-            })
-        except Exception as e:
-            logger.error(f"❌ Erreur /stats: {e}")
-            return jsonify({
-                "success": False,
-                "error": str(e)
-            }), 500
-    
-    @app.route('/analyses')
-    def get_analyses():
-        """Liste des analyses."""
-        try:
-            page = int(request.args.get('page', 1))
-            per_page = int(request.args.get('per_page', 50))
-            
-            with get_db() as db:
-                query = db.query(Analyse).order_by(Analyse.created_at.desc())
-                total = query.count()
-                analyses = query.offset((page - 1) * per_page).limit(per_page).all()
-                
-                return jsonify({
-                    "success": True,
-                    "total": total,
-                    "page": page,
-                    "per_page": per_page,
-                    "analyses": [{
-                        "id": a.id,
-                        "date_course": a.date_course,
-                        "reunion": a.reunion,
-                        "course": a.course,
-                        "hippodrome": a.hippodrome,
-                        "top_5": a.top_5,
-                        "roi_attendu": a.roi_attendu,
-                        "created_at": a.created_at.isoformat()
-                    } for a in analyses]
-                })
-        
-        except Exception as e:
-            logger.error(f"❌ Erreur /analyses: {e}")
-            return jsonify({
-                "success": False,
-                "error": str(e)
-            }), 500
 
 
 # ============================================================================
 # INITIALISATION
 # ============================================================================
 
-def init_app():
-    """Initialisation au démarrage (compatible Flask 3.0)."""
-    try:
-        logger.info("🚀 Initialisation Trot System v8.3")
-        
-        # Initialiser database si disponible
-        if HAS_DATABASE and DATABASE_URL:
-            success = init_database()
-            if success:
-                logger.info("✅ Database initialisée")
-                # Nettoyer cache expiré
-                clean_expired_cache()
-            else:
-                logger.warning("⚠️ Database non disponible")
-        else:
-            logger.warning("⚠️ Base de données non configurée - Mode dégradé")
-        
-        # Afficher config
-        logger.info(f"Gemini: {'✅ Configuré' if GEMINI_API_KEY else '❌ Non configuré'}")
-        logger.info(f"Database: {'✅ Activé' if HAS_DATABASE else '❌ Désactivé'}")
-        logger.info("✅ Application prête")
-    
-    except Exception as e:
-        logger.error(f"❌ Erreur initialisation: {e}")
-
-
-# Appeler initialisation au démarrage (Flask 3.0 compatible)
+# Context de l'app pour initialisation
 with app.app_context():
-    init_app()
+    logger.info("🚀 Initialisation Trot System v8.3")
+    
+    # Base de données
+    if HAS_DATABASE:
+        try:
+            init_database()
+            if test_connection():
+                logger.info("✅ Base de données connectée")
+            else:
+                logger.warning("⚠️ Base de données non accessible")
+                HAS_DATABASE = False
+        except Exception as e:
+            logger.warning(f"⚠️ Base de données non configurée: {e}")
+            HAS_DATABASE = False
+    else:
+        logger.warning("⚠️ Base de données non configurée - Mode dégradé")
+    
+    # Gemini
+    if GEMINI_API_KEY:
+        logger.info("Gemini: ✅ Configuré")
+    else:
+        logger.warning("Gemini: ⚠️ Non configuré (analyse IA désactivée)")
+    
+    logger.info(f"Database: {'✅ Activé' if HAS_DATABASE else '❌ Désactivé'}")
+    logger.info("✅ Application prête")
 
-
-# ============================================================================
-# POINT D'ENTRÉE
-# ============================================================================
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
-    debug = os.getenv('ENVIRONMENT', 'production') != 'production'
-    
-    logger.info(f"🚀 Démarrage sur port {port}")
-    
-    app.run(
-        host='0.0.0.0',
-        port=port,
-        debug=debug
-    )
+    app.run(host='0.0.0.0', port=10000, debug=False)
