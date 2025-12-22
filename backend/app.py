@@ -211,39 +211,75 @@ def parse_course_data(data: Dict) -> Optional[Dict]:
         Données formatées ou None
     """
     try:
-        programme = data.get('programme', {})
-        reunions = programme.get('reunions', [])
+        # CORRECTION: L'API retourne directement la course OU un programme
+        # Gérer les deux structures possibles
         
-        if not reunions:
-            logger.error("❌ Aucune réunion dans les données")
+        # Structure 1: API retourne directement la course (URL /RX/CX)
+        if 'libelle' in data and 'participants' in data:
+            course = data
+            hippodrome_data = data.get('hippodrome', {})
+            
+            parsed = {
+                'date': '',  # Pas dans cette structure
+                'reunion': int(data.get('numReunion', 0)),
+                'course': int(data.get('numOrdre', 0)),
+                'hippodrome': hippodrome_data.get('libelleLong', 'INCONNU'),
+                'discipline': data.get('specialite', 'TROT'),
+                'distance': int(data.get('distance', 0)),
+                'monte': data.get('specialite', 'ATTELE'),
+                'conditions': data.get('conditions', ''),
+                'prix': int(data.get('montantPrix', 0)),
+                'nb_partants': int(data.get('nombreDeclaresPartants', 0)),
+                'partants': []
+            }
+        
+        # Structure 2: API retourne programme avec réunions (URL /JJMMAAAA)
+        elif 'programme' in data:
+            programme = data.get('programme', {})
+            reunions = programme.get('reunions', [])
+            
+            if not reunions:
+                logger.error("❌ Aucune réunion dans les données")
+                return None
+            
+            reunion = reunions[0]
+            courses = reunion.get('courses', [])
+            
+            if not courses:
+                logger.error("❌ Aucune course dans la réunion")
+                return None
+            
+            course = courses[0]
+            
+            parsed = {
+                'date': programme.get('date', ''),
+                'reunion': reunion.get('numOfficiel', 0),
+                'course': course.get('numOrdre', 0),
+                'hippodrome': reunion.get('hippodrome', {}).get('libelleLong', 'INCONNU'),
+                'discipline': course.get('libelleDiscipline', 'TROT'),
+                'distance': int(course.get('distance', 0)),
+                'monte': course.get('libelleMonte', 'ATTELE'),
+                'conditions': course.get('conditions', ''),
+                'prix': int(course.get('montantPrix', 0)),
+                'nb_partants': len(course.get('participants', [])),
+                'partants': []
+            }
+        
+        else:
+            logger.error("❌ Structure JSON non reconnue")
             return None
         
-        reunion = reunions[0]
-        courses = reunion.get('courses', [])
+        # Extraire partants (même logique pour les 2 structures)
+        participants = course.get('participants', [])
         
-        if not courses:
-            logger.error("❌ Aucune course dans la réunion")
+        # Si participants est vide mais nombreDeclaresPartants > 0
+        # C'est une course déjà terminée sans détails partants
+        if not participants and parsed.get('nb_partants', 0) > 0:
+            logger.warning(f"⚠️ Course terminée sans détails partants disponibles")
+            logger.warning(f"⚠️ Impossible d'analyser une course passée sans données partants")
             return None
         
-        course = courses[0]
-        
-        # Extraire infos course
-        parsed = {
-            'date': programme.get('date', ''),
-            'reunion': reunion.get('numOfficiel', 0),
-            'course': course.get('numOrdre', 0),
-            'hippodrome': reunion.get('hippodrome', {}).get('libelleLong', 'INCONNU'),
-            'discipline': course.get('libelleDiscipline', 'TROT'),
-            'distance': int(course.get('distance', 0)),
-            'monte': course.get('libelleMonte', 'ATTELE'),
-            'conditions': course.get('conditions', ''),
-            'prix': int(course.get('montantPrix', 0)),
-            'nb_partants': len(course.get('participants', [])),
-            'partants': []
-        }
-        
-        # Extraire partants
-        for p in course.get('participants', []):
+        for p in participants:
             try:
                 partant = {
                     'numero': int(p.get('numPmu', 0)),
@@ -272,7 +308,7 @@ def parse_course_data(data: Dict) -> Optional[Dict]:
             logger.error("❌ Aucun partant valide")
             return None
         
-        logger.info(f"✅ Course parsée: {parsed['nb_partants']} partants")
+        logger.info(f"✅ Course parsée: {len(parsed['partants'])} partants")
         return parsed
     
     except Exception as e:
