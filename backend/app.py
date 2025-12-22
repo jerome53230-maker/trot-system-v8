@@ -1,1350 +1,899 @@
 """
-TROT SYSTEM v8.2 - API FLASK AVEC POSTGRESQL
-Version complète optimisée avec persistance, cache DB, et statistiques avancées
-Compatible Python 3.11+
-
-Améliorations v8.2:
-- PostgreSQL pour persistance
-- Cache intelligent en DB
-- Statistiques avancées
-- Dashboard admin
-- Export CSV
-- Pagination
-- Gestion erreurs robuste
-- Performance optimisée
+Trot System v8.3 FINAL - Backend API Complet
+Toutes corrections appliquées : Flask 3.0, Python 3.11+, Optimisations
 """
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os
-import json
 import requests
-from datetime import datetime, timedelta
-from pathlib import Path
 import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+import os
+import re
 import time
-from functools import wraps
-from typing import Optional, Dict, List
-import csv
-import io
+import json
 
-# Imports PostgreSQL
-from database import init_database, get_db, test_connection, get_db_stats, clean_expired_cache, close_database
-from models import Analyse, Performance, CoursesCache, Statistic
-from sqlalchemy import func, and_, or_
+# Configuration
+try:
+    from config import Config
+    config = Config
+except ImportError:
+    # Fallback si config.py n'existe pas
+    class Config:
+        GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+        DATABASE_URL = os.getenv('DATABASE_URL', '')
+        MAX_RETRIES = 3
+        REQUEST_TIMEOUT = 10
+        CACHE_TTL_PMU = 300
+        CACHE_TTL_GEMINI = 3600
 
-# Configuration Flask
-app = Flask(__name__)
-CORS(app)
+    config = Config
 
-# Configuration logging améliorée
+# Database
+DATABASE_URL = config.DATABASE_URL
+if DATABASE_URL:
+    try:
+        from database import init_database, get_db, test_connection, get_db_stats, clean_expired_cache, close_database
+        from models import Analyse, Performance, CoursesCache, Statistic
+        HAS_DATABASE = True
+    except ImportError:
+        HAS_DATABASE = False
+        logging.warning("⚠️ Modules database non disponibles")
+else:
+    HAS_DATABASE = False
+
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('trot-system')
 
+# Flask App
+app = Flask(__name__)
+CORS(app)
+
+# Gemini AI
+GEMINI_API_KEY = config.GEMINI_API_KEY
+GEMINI_MODEL = 'gemini-2.0-flash-exp'
+
+# Cache en mémoire
+cache_courses = {}
+cache_gemini = {}
+
 # Configuration
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-MAX_RETRIES = 3
-TIMEOUT = 10
-CACHE_TTL = 300  # 5 minutes
-
-# Compteurs pour métriques
-request_count = 0
-error_count = 0
-cache_hits = 0
-cache_misses = 0
-
-# ============================================================================
-# INITIALISATION
-# ============================================================================
-
-# Initialiser la base de données au démarrage
-db_initialized = init_database()
-
-if db_initialized:
-    logger.info("✅ Base de données PostgreSQL initialisée")
-    # Nettoyer cache expiré au démarrage
-    deleted = clean_expired_cache()
-    logger.info(f"🧹 Cache nettoyé: {deleted} entrées expirées")
-else:
-    logger.warning("⚠️ Base de données non disponible - Mode dégradé")
+MAX_RETRIES = config.MAX_RETRIES
+RETRY_DELAY = 2
+BASE_URL = "https://online.turfinfo.api.pmu.fr/rest/client/1"
 
 
 # ============================================================================
-# DÉCORATEURS ET UTILITAIRES
+# UTILITAIRES
 # ============================================================================
 
-def retry_on_failure(max_attempts=3, delay=1):
-    """Décorateur pour retry automatique."""
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            for attempt in range(max_attempts):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    if attempt == max_attempts - 1:
-                        raise
-                    logger.warning(f"Tentative {attempt + 1}/{max_attempts} échouée: {e}")
-                    time.sleep(delay * (attempt + 1))
-            return None
-        return wrapper
-    return decorator
-
-
-def track_request(func):
-    """Décorateur pour tracker les requêtes."""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        global request_count
-        request_count += 1
-        start_time = time.time()
-        
-        try:
-            result = func(*args, **kwargs)
-            duration = time.time() - start_time
-            logger.info(f"✅ {func.__name__} terminé en {duration:.2f}s")
-            return result
-        except Exception as e:
-            global error_count
-            error_count += 1
-            duration = time.time() - start_time
-            logger.error(f"❌ {func.__name__} échoué après {duration:.2f}s: {e}")
-            raise
+def clean_cache():
+    """Nettoie cache mémoire expiré."""
+    global cache_courses, cache_gemini
+    now = datetime.now()
     
-    return wrapper
+    # Nettoyer cache courses
+    expired_keys = [k for k, v in cache_courses.items() if v.get('expires_at', now) < now]
+    for key in expired_keys:
+        del cache_courses[key]
+    
+    # Nettoyer cache Gemini
+    expired_keys = [k for k, v in cache_gemini.items() if v.get('expires_at', now) < now]
+    for key in expired_keys:
+        del cache_gemini[key]
+    
+    if expired_keys:
+        logger.info(f"🧹 Cache nettoyé: {len(expired_keys)} entrées")
 
 
 def validate_date(date_str: str) -> bool:
-    """Valide le format de date DDMMYYYY."""
-    if not date_str or len(date_str) != 8:
+    """Valide format date DDMMYYYY."""
+    if not date_str or not isinstance(date_str, str):
         return False
+    
+    if not re.match(r'^\d{8}$', date_str):
+        return False
+    
     try:
-        day = int(date_str[:2])
-        month = int(date_str[2:4])
-        year = int(date_str[4:])
-        datetime(year, month, day)
+        datetime.strptime(date_str, '%d%m%Y')
         return True
-    except (ValueError, TypeError):
+    except ValueError:
         return False
 
 
-def validate_params(date_str: str, reunion: int, course: int, budget: int) -> Optional[str]:
-    """Valide tous les paramètres. Retourne None si OK, message d'erreur sinon."""
-    if not date_str:
-        return "Paramètre 'date' manquant"
-    
+def validate_params(date_str: str, reunion: int, course: int, budget: int) -> Tuple[bool, Optional[str]]:
+    """Valide tous les paramètres."""
+    # Date
     if not validate_date(date_str):
-        return "Date invalide. Format attendu: DDMMYYYY (ex: 20122025)"
+        return False, "Date invalide. Format requis: DDMMYYYY"
     
-    if not reunion or not (1 <= reunion <= 9):
-        return "Réunion invalide. Doit être entre 1 et 9"
+    # Réunion
+    if not isinstance(reunion, int) or reunion < 1 or reunion > 9:
+        return False, "Réunion invalide. Valeur entre 1 et 9"
     
-    if not course or not (1 <= course <= 16):
-        return "Course invalide. Doit être entre 1 et 16"
+    # Course
+    if not isinstance(course, int) or course < 1 or course > 16:
+        return False, "Course invalide. Valeur entre 1 et 16"
     
-    if budget not in [5, 10, 15, 20]:
-        return "Budget invalide. Doit être 5, 10, 15 ou 20€"
+    # Budget
+    valid_budgets = [5, 10, 15, 20]
+    if budget not in valid_budgets:
+        return False, f"Budget invalide. Valeurs acceptées: {valid_budgets}"
     
+    return True, None
+
+
+# ============================================================================
+# SCRAPING PMU
+# ============================================================================
+
+def scrape_pmu_with_retry(date_str: str, reunion: int, course: int) -> Optional[Dict]:
+    """
+    Scrape API PMU avec retry automatique.
+    
+    Args:
+        date_str: Date format DDMMYYYY
+        reunion: Numéro réunion (1-9)
+        course: Numéro course (1-16)
+        
+    Returns:
+        Données course ou None si échec
+    """
+    # Vérifier cache mémoire
+    cache_key = f"{date_str}_R{reunion}_C{course}"
+    
+    if cache_key in cache_courses:
+        cached = cache_courses[cache_key]
+        if cached.get('expires_at', datetime.now()) > datetime.now():
+            logger.info(f"📦 Cache hit: {cache_key}")
+            return cached['data']
+    
+    # Scraper avec retry
+    for attempt in range(MAX_RETRIES):
+        try:
+            url = f"{BASE_URL}/programme/{date_str}/R{reunion}/C{course}"
+            
+            logger.info(f"🌐 Scraping PMU (tentative {attempt + 1}/{MAX_RETRIES}): {url}")
+            
+            response = requests.get(url, timeout=config.REQUEST_TIMEOUT)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                # Valider données
+                if not data or 'programme' not in data:
+                    logger.warning(f"⚠️ Données invalides: {url}")
+                    return None
+                
+                # Mettre en cache
+                cache_courses[cache_key] = {
+                    'data': data,
+                    'expires_at': datetime.now() + timedelta(seconds=config.CACHE_TTL_PMU)
+                }
+                
+                logger.info(f"✅ Scraping réussi: {cache_key}")
+                return data
+            
+            elif response.status_code == 404:
+                logger.warning(f"⚠️ Course introuvable (404): {url}")
+                return None
+            
+            else:
+                logger.warning(f"⚠️ Status {response.status_code}: {url}")
+        
+        except requests.Timeout:
+            logger.warning(f"⏱️ Timeout tentative {attempt + 1}/{MAX_RETRIES}")
+        
+        except Exception as e:
+            logger.error(f"❌ Erreur scraping: {e}")
+        
+        # Retry delay
+        if attempt < MAX_RETRIES - 1:
+            time.sleep(RETRY_DELAY)
+    
+    logger.error(f"❌ Échec scraping après {MAX_RETRIES} tentatives")
     return None
 
 
-# ============================================================================
-# CACHE DATABASE
-# ============================================================================
-
-def get_from_cache_db(cache_key: str) -> Optional[Dict]:
+def parse_course_data(data: Dict) -> Optional[Dict]:
     """
-    Récupère une entrée du cache PostgreSQL.
-    Retourne les données si cache valide, None sinon.
-    """
-    if not db_initialized:
-        return None
+    Parse données course PMU.
     
-    try:
-        global cache_hits, cache_misses
+    Args:
+        data: Réponse API PMU
         
-        with get_db() as db:
-            cached = db.query(CoursesCache).filter(
-                CoursesCache.cache_key == cache_key,
-                CoursesCache.expires_at > datetime.now()
-            ).first()
-            
-            if cached:
-                # Incrémenter compteur hits
-                cached.hits += 1
-                db.commit()
-                cache_hits += 1
-                logger.info(f"✅ Cache hit: {cache_key}")
-                return cached.data
-            else:
-                cache_misses += 1
-                logger.debug(f"❌ Cache miss: {cache_key}")
-                return None
-    
-    except Exception as e:
-        logger.error(f"❌ Erreur lecture cache: {e}")
-        return None
-
-
-def set_cache_db(cache_key: str, data: Dict, ttl: int = CACHE_TTL) -> bool:
-    """
-    Sauvegarde une entrée dans le cache PostgreSQL.
-    Utilise upsert pour éviter les duplicates.
-    """
-    if not db_initialized:
-        return False
-    
-    try:
-        with get_db() as db:
-            # Supprimer ancienne entrée si existe
-            db.query(CoursesCache).filter(
-                CoursesCache.cache_key == cache_key
-            ).delete()
-            
-            # Créer nouvelle entrée
-            cache = CoursesCache(
-                cache_key=cache_key,
-                data=data,
-                expires_at=datetime.now() + timedelta(seconds=ttl),
-                hits=0,
-                size_bytes=len(json.dumps(data))
-            )
-            db.add(cache)
-            db.commit()
-            
-            logger.debug(f"✅ Cache set: {cache_key} (TTL: {ttl}s)")
-            return True
-    
-    except Exception as e:
-        logger.error(f"❌ Erreur écriture cache: {e}")
-        return False
-
-
-# ============================================================================
-# SCRAPING PMU AVEC CACHE DB
-# ============================================================================
-
-@retry_on_failure(max_attempts=3, delay=2)
-def scrape_pmu_race(date_str: str, reunion: int, course: int) -> Optional[Dict]:
-    """
-    Scrape les données PMU avec cache PostgreSQL et retry automatique.
+    Returns:
+        Données formatées ou None
     """
     try:
-        # Vérifier cache DB
-        cache_key = f"pmu_{date_str}_R{reunion}C{course}"
-        cached_data = get_from_cache_db(cache_key)
-        if cached_data:
-            return cached_data
+        programme = data.get('programme', {})
+        reunions = programme.get('reunions', [])
         
-        # URL API PMU
-        url = f"https://online.turfinfo.api.pmu.fr/rest/client/1/programme/{date_str}/R{reunion}/C{course}"
-        logger.info(f"📡 Récupération course: {url}")
+        if not reunions:
+            logger.error("❌ Aucune réunion dans les données")
+            return None
         
-        # Requête avec timeout
-        response = requests.get(url, timeout=TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
+        reunion = reunions[0]
+        courses = reunion.get('courses', [])
         
-        # Validation structure données
-        if not isinstance(data, dict):
-            raise ValueError("Structure de données invalide")
+        if not courses:
+            logger.error("❌ Aucune course dans la réunion")
+            return None
         
-        # Parser les données essentielles
-        race_data = {
-            'date': date_str,
-            'reunion': reunion,
-            'course': course,
-            'hippodrome': data.get('libelleLongHippodrome', 'INCONNU'),
-            'discipline': data.get('discipline', 'TROT'),
-            'distance': int(data.get('distance', 0)),
-            'nb_partants': len(data.get('participants', [])),
-            'partants': [],
-            'conditions': data.get('conditions', ''),
-            'monte': data.get('monte', '')
+        course = courses[0]
+        
+        # Extraire infos course
+        parsed = {
+            'date': programme.get('date', ''),
+            'reunion': reunion.get('numOfficiel', 0),
+            'course': course.get('numOrdre', 0),
+            'hippodrome': reunion.get('hippodrome', {}).get('libelleLong', 'INCONNU'),
+            'discipline': course.get('libelleDiscipline', 'TROT'),
+            'distance': int(course.get('distance', 0)),
+            'monte': course.get('libelleMonte', 'ATTELE'),
+            'conditions': course.get('conditions', ''),
+            'prix': int(course.get('montantPrix', 0)),
+            'nb_partants': len(course.get('participants', [])),
+            'partants': []
         }
         
-        # Parser les partants
-        for p in data.get('participants', []):
+        # Extraire partants
+        for p in course.get('participants', []):
             try:
                 partant = {
                     'numero': int(p.get('numPmu', 0)),
                     'nom': str(p.get('nom', '')),
+                    'sexe': str(p.get('sexe', '')),
+                    'age': int(p.get('age', 0)),
                     'driver': str(p.get('driver', '')),
                     'entraineur': str(p.get('entraineur', '')),
                     'proprietaire': str(p.get('proprietaire', '')),
-                    'cote': float(p.get('rapport', {}).get('direct', {}).get('rapportDirect', 0.0)),
                     'musique': str(p.get('musique', '')),
-                    'age': int(p.get('age', 0)),
-                    'sexe': str(p.get('sexe', '')),
-                    'race': str(p.get('race', '')),
-                    'deferre': bool(p.get('deferre', False)),
-                    'oeilleres': bool(p.get('oeilleres', False)),
-                    'gains': int(p.get('gainsCarriere', 0)),
                     'nb_courses': int(p.get('nombreCourses', 0)),
                     'nb_victoires': int(p.get('nombreVictoires', 0)),
-                    'score': 0.0
+                    'nb_places': int(p.get('nombrePlaces', 0)),
+                    'gains': int(p.get('gainsCarriere', 0)),
+                    'cote': float(p.get('rapport', {}).get('direct', {}).get('rapportDirect', 0.0)),
+                    'deferre': bool(p.get('deferre', False)),
+                    'oeilleres': bool(p.get('oeilleres', False))
                 }
-                race_data['partants'].append(partant)
-            except (ValueError, TypeError, KeyError) as e:
-                logger.warning(f"Erreur parsing partant {p.get('numPmu', '?')}: {e}")
+                parsed['partants'].append(partant)
+            
+            except Exception as e:
+                logger.warning(f"⚠️ Erreur parsing partant: {e}")
                 continue
         
-        logger.info(f"✅ Course récupérée: {race_data['nb_partants']} partants")
+        if not parsed['partants']:
+            logger.error("❌ Aucun partant valide")
+            return None
         
-        # Sauvegarder dans cache DB
-        set_cache_db(cache_key, race_data, ttl=CACHE_TTL)
-        
-        return race_data
-    
-    except requests.Timeout:
-        logger.error(f"❌ Timeout scraping (>{TIMEOUT}s)")
-        raise
-    except requests.RequestException as e:
-        logger.error(f"❌ Erreur requête API PMU: {e}")
-        raise
-    except (ValueError, KeyError) as e:
-        logger.error(f"❌ Erreur parsing données PMU: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"❌ Erreur inattendue scraping: {e}")
-        raise
-
-
-# ============================================================================
-# SCORING AVANCÉ
-# ============================================================================
-
-def score_horses(race_data: Dict) -> Dict:
-    """
-    Scoring avancé multi-facteurs avec pondération.
-    7 facteurs: cote, musique, ratio victoires, gains, âge, équipement, distance.
-    """
-    try:
-        logger.info(f"🔢 Scoring {race_data['nb_partants']} chevaux...")
-        
-        for partant in race_data['partants']:
-            score = 50.0  # Score de base
-            
-            # FACTEUR 1: Cote (poids 20%)
-            cote = partant.get('cote', 0)
-            if 3 <= cote <= 8:
-                score += 20  # Sweet spot
-            elif 8 < cote <= 15:
-                score += 12  # Outsider intéressant
-            elif cote < 3:
-                score += 8   # Favori
-            elif cote > 30:
-                score -= 10  # Trop improbable
-            
-            # FACTEUR 2: Musique récente (poids 25%)
-            musique = partant.get('musique', '')
-            if musique and len(musique) >= 5:
-                recent = musique[:5]
-                
-                # Victoires récentes
-                nb_victoires = recent.count('1')
-                score += nb_victoires * 12
-                
-                # Places récentes (2-3)
-                nb_places = recent.count('2') + recent.count('3')
-                score += nb_places * 6
-                
-                # Régularité
-                irregularites = recent.count('0') + recent.count('D') + recent.count('A')
-                score -= irregularites * 8
-                
-                # Forme ascendante
-                if len(recent) >= 3:
-                    try:
-                        positions = [int(c) for c in recent[:3] if c.isdigit()]
-                        if len(positions) >= 2 and positions[0] < positions[-1]:
-                            score += 10
-                    except:
-                        pass
-            
-            # FACTEUR 3: Ratio victoires/courses (poids 15%)
-            nb_courses = partant.get('nb_courses', 0)
-            nb_victoires = partant.get('nb_victoires', 0)
-            if nb_courses > 0:
-                ratio = nb_victoires / nb_courses
-                score += ratio * 30
-            
-            # FACTEUR 4: Gains (poids 10%)
-            gains = partant.get('gains', 0)
-            if gains > 100000:
-                score += 15
-            elif gains > 50000:
-                score += 10
-            elif gains > 20000:
-                score += 5
-            
-            # FACTEUR 5: Expérience (poids 10%)
-            age = partant.get('age', 0)
-            if 4 <= age <= 6:
-                score += 10  # Âge idéal
-            elif age == 3:
-                score += 5   # Jeune prometteur
-            elif age > 8:
-                score -= 5   # Vétéran
-            
-            # FACTEUR 6: Équipement (poids 5%)
-            if partant.get('deferre'):
-                score += 5
-            if partant.get('oeilleres'):
-                score += 3
-            
-            # FACTEUR 7: Distance (poids 15%)
-            if race_data['distance'] > 2500:
-                if musique and '1' in musique[:3]:
-                    score += 8
-            
-            # Normaliser score (0-100)
-            score = max(0, min(100, score))
-            partant['score'] = round(score, 2)
-        
-        # Trier par score décroissant
-        race_data['partants'].sort(key=lambda x: x['score'], reverse=True)
-        
-        top_5_nums = [p['numero'] for p in race_data['partants'][:5]]
-        logger.info(f"✅ Scoring terminé. Top 5: {top_5_nums}")
-        
-        return race_data
+        logger.info(f"✅ Course parsée: {parsed['nb_partants']} partants")
+        return parsed
     
     except Exception as e:
-        logger.error(f"❌ Erreur scoring: {e}")
-        return race_data
+        logger.error(f"❌ Erreur parse_course_data: {e}")
+        return None
 
 
 # ============================================================================
-# GÉNÉRATION PARIS OPTIMISÉE
+# SCORING
 # ============================================================================
 
-def generate_bets(race_data: Dict, budget: int) -> List[Dict]:
+def calculer_score_cheval(partant: Dict, course_data: Dict) -> float:
     """
-    Génère des paris optimisés selon le budget et la qualité des chevaux.
-    Stratégie adaptative: agressive/équilibrée/conservatrice.
+    Calcule score d'un cheval (système 7 facteurs).
+    
+    Args:
+        partant: Données du cheval
+        course_data: Données de la course
+        
+    Returns:
+        Score entre 0 et 100
     """
     try:
-        logger.info(f"💰 Génération paris avec budget {budget}€...")
+        score = 0.0
         
-        paris = []
-        partants = race_data['partants']
+        # 1. Ratio victoires (20 points max)
+        nb_courses = partant.get('nb_courses', 0)
+        nb_victoires = partant.get('nb_victoires', 0)
+        if nb_courses > 0:
+            ratio_victoires = nb_victoires / nb_courses
+            score += ratio_victoires * 20
         
-        if len(partants) == 0:
-            logger.warning("⚠️ Pas de partants, aucun pari généré")
+        # 2. Ratio places (15 points max)
+        nb_places = partant.get('nb_places', 0)
+        if nb_courses > 0:
+            ratio_places = nb_places / nb_courses
+            score += ratio_places * 15
+        
+        # 3. Gains moyens (15 points max)
+        gains = partant.get('gains', 0)
+        if nb_courses > 0 and gains > 0:
+            gains_moyen = gains / nb_courses
+            # Normaliser (max 50000€ par course)
+            score += min(gains_moyen / 50000, 1.0) * 15
+        
+        # 4. Forme récente via musique (20 points max)
+        musique = partant.get('musique', '')
+        if musique:
+            # Prendre 5 dernières courses
+            recent = musique[:5] if len(musique) >= 5 else musique
+            forme = 0
+            for position in recent:
+                if position.isdigit():
+                    pos = int(position)
+                    if pos == 1:
+                        forme += 5
+                    elif pos == 2:
+                        forme += 3
+                    elif pos == 3:
+                        forme += 2
+                    elif pos <= 5:
+                        forme += 1
+            # Normaliser sur 20
+            score += min(forme / 25 * 20, 20)
+        
+        # 5. Expérience (10 points max)
+        # Optimal: 20-50 courses
+        if nb_courses >= 20:
+            experience = min(nb_courses / 50, 1.0) * 10
+            score += experience
+        
+        # 6. Âge optimal (10 points max)
+        # Optimal: 4-6 ans
+        age = partant.get('age', 0)
+        if 4 <= age <= 6:
+            score += 10
+        elif 3 <= age <= 7:
+            score += 5
+        
+        # 7. Équipement (10 points max)
+        if partant.get('deferre', False):
+            score += 5
+        if partant.get('oeilleres', False):
+            score += 5
+        
+        # Normaliser sur 100
+        score = min(score, 100.0)
+        
+        return round(score, 2)
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur calcul score: {e}")
+        return 0.0
+
+
+def scorer_tous_partants(course_data: Dict) -> List[Dict]:
+    """
+    Score tous les partants et les trie.
+    
+    Args:
+        course_data: Données de la course
+        
+    Returns:
+        Liste partants avec scores, triés
+    """
+    try:
+        partants = course_data.get('partants', [])
+        
+        if not partants:
+            logger.error("❌ Aucun partant à scorer")
             return []
         
-        # Seuils de qualité
-        top_5 = partants[:min(5, len(partants))]
-        excellent = [p for p in top_5 if p['score'] >= 75]
-        bon = [p for p in top_5 if 60 <= p['score'] < 75]
+        # Calculer scores
+        for partant in partants:
+            score = calculer_score_cheval(partant, course_data)
+            partant['score'] = score
         
-        # Stratégie selon budget et qualité
-        if budget >= 20:
-            if len(excellent) >= 2:
-                # Stratégie AGRESSIVE
-                paris = [
-                    {
-                        'type': 'SIMPLE_GAGNANT',
-                        'chevaux': [excellent[0]['numero']],
-                        'mise': 6,
-                        'cote_estimee': excellent[0]['cote'],
-                        'roi_attendu': excellent[0]['cote'] * 0.7,
-                        'justification': f"Favori n°{excellent[0]['numero']} (score {excellent[0]['score']})"
-                    },
-                    {
-                        'type': 'SIMPLE_PLACE',
-                        'chevaux': [excellent[1]['numero']],
-                        'mise': 4,
-                        'cote_estimee': excellent[1]['cote'] / 3,
-                        'roi_attendu': (excellent[1]['cote'] / 3) * 0.8,
-                        'justification': f"Outsider n°{excellent[1]['numero']} (score {excellent[1]['score']})"
-                    },
-                    {
-                        'type': 'COUPLE_ORDRE',
-                        'chevaux': [excellent[0]['numero'], excellent[1]['numero']],
-                        'mise': 10,
-                        'cote_estimee': excellent[0]['cote'] * excellent[1]['cote'] * 0.3,
-                        'roi_attendu': excellent[0]['cote'] * excellent[1]['cote'] * 0.2,
-                        'justification': f"Couple {excellent[0]['numero']}-{excellent[1]['numero']}"
-                    }
-                ]
-            elif len(excellent) >= 1 and len(bon) >= 2:
-                # Stratégie ÉQUILIBRÉE
-                paris = [
-                    {
-                        'type': 'SIMPLE_GAGNANT',
-                        'chevaux': [excellent[0]['numero']],
-                        'mise': 7,
-                        'cote_estimee': excellent[0]['cote'],
-                        'roi_attendu': excellent[0]['cote'] * 0.7,
-                        'justification': f"Favori n°{excellent[0]['numero']}"
-                    },
-                    {
-                        'type': 'COUPLE_PLACE',
-                        'chevaux': [excellent[0]['numero'], bon[0]['numero']],
-                        'mise': 8,
-                        'cote_estimee': excellent[0]['cote'] * bon[0]['cote'] * 0.15,
-                        'roi_attendu': excellent[0]['cote'] * bon[0]['cote'] * 0.1,
-                        'justification': f"Couple placé {excellent[0]['numero']}-{bon[0]['numero']}"
-                    },
-                    {
-                        'type': 'TRIO_ORDRE',
-                        'chevaux': [excellent[0]['numero'], bon[0]['numero'], bon[1]['numero']],
-                        'mise': 5,
-                        'cote_estimee': 50,
-                        'roi_attendu': 35,
-                        'justification': f"Trio {excellent[0]['numero']}-{bon[0]['numero']}-{bon[1]['numero']}"
-                    }
-                ]
-            else:
-                # Stratégie CONSERVATRICE
-                paris = [
-                    {
-                        'type': 'SIMPLE_PLACE',
-                        'chevaux': [top_5[0]['numero']],
-                        'mise': 8,
-                        'cote_estimee': top_5[0]['cote'] / 3,
-                        'roi_attendu': (top_5[0]['cote'] / 3) * 0.8,
-                        'justification': f"Placé n°{top_5[0]['numero']}"
-                    },
-                    {
-                        'type': 'COUPLE_PLACE',
-                        'chevaux': [top_5[0]['numero'], top_5[1]['numero']],
-                        'mise': 12,
-                        'cote_estimee': 8,
-                        'roi_attendu': 6,
-                        'justification': f"Couple placé {top_5[0]['numero']}-{top_5[1]['numero']}"
-                    }
-                ]
+        # Trier par score décroissant
+        partants.sort(key=lambda x: x.get('score', 0), reverse=True)
         
-        elif budget >= 10:
-            if len(excellent) >= 1:
-                paris = [
-                    {
-                        'type': 'SIMPLE_GAGNANT',
-                        'chevaux': [excellent[0]['numero']],
-                        'mise': 6,
-                        'cote_estimee': excellent[0]['cote'],
-                        'roi_attendu': excellent[0]['cote'] * 0.7,
-                        'justification': f"Favori n°{excellent[0]['numero']}"
-                    },
-                    {
-                        'type': 'SIMPLE_PLACE',
-                        'chevaux': [top_5[1]['numero']],
-                        'mise': 4,
-                        'cote_estimee': top_5[1]['cote'] / 3,
-                        'roi_attendu': (top_5[1]['cote'] / 3) * 0.8,
-                        'justification': f"Placé n°{top_5[1]['numero']}"
-                    }
-                ]
-            else:
-                paris = [
-                    {
-                        'type': 'SIMPLE_PLACE',
-                        'chevaux': [top_5[0]['numero']],
-                        'mise': 10,
-                        'cote_estimee': top_5[0]['cote'] / 3,
-                        'roi_attendu': (top_5[0]['cote'] / 3) * 0.8,
-                        'justification': f"Placé n°{top_5[0]['numero']}"
-                    }
-                ]
+        logger.info(f"✅ {len(partants)} chevaux scorés")
         
-        else:
-            # Budget 5€
-            paris = [
-                {
-                    'type': 'SIMPLE_PLACE' if len(excellent) == 0 else 'SIMPLE_GAGNANT',
-                    'chevaux': [top_5[0]['numero']],
+        return partants
+    
+    except Exception as e:
+        logger.error(f"❌ Erreur scorer_tous_partants: {e}")
+        return []
+
+
+# ============================================================================
+# PARIS RECOMMANDÉS
+# ============================================================================
+
+def generer_paris(top_chevaux: List[Dict], budget: int) -> List[Dict]:
+    """
+    Génère recommandations de paris selon budget.
+    
+    Args:
+        top_chevaux: Top 5 chevaux
+        budget: Budget disponible (5, 10, 15, 20)
+        
+    Returns:
+        Liste de paris recommandés
+    """
+    try:
+        if not top_chevaux or len(top_chevaux) < 3:
+            logger.warning("⚠️ Pas assez de chevaux pour paris")
+            return []
+        
+        paris = []
+        
+        if budget >= 5:
+            # Simple Gagnant
+            paris.append({
+                'type': 'SIMPLE_GAGNANT',
+                'chevaux': [top_chevaux[0]['numero']],
+                'mise': 3,
+                'gain_estime': round(top_chevaux[0].get('cote', 2.0) * 3, 2)
+            })
+            
+            # Simple Placé
+            paris.append({
+                'type': 'SIMPLE_PLACE',
+                'chevaux': [top_chevaux[0]['numero']],
+                'mise': 2,
+                'gain_estime': round(top_chevaux[0].get('cote', 2.0) * 0.4 * 2, 2)
+            })
+        
+        if budget >= 10:
+            # Couplé Gagnant
+            if len(top_chevaux) >= 2:
+                paris.append({
+                    'type': 'COUPLE_GAGNANT',
+                    'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero']],
+                    'mise': 4,
+                    'gain_estime': round((top_chevaux[0].get('cote', 2.0) + top_chevaux[1].get('cote', 2.0)) * 2, 2)
+                })
+            
+            # Simple Placé sécurité
+            if len(top_chevaux) >= 2:
+                paris.append({
+                    'type': 'SIMPLE_PLACE',
+                    'chevaux': [top_chevaux[1]['numero']],
+                    'mise': 1,
+                    'gain_estime': round(top_chevaux[1].get('cote', 2.0) * 0.4 * 1, 2)
+                })
+        
+        if budget >= 15:
+            # Trio
+            if len(top_chevaux) >= 3:
+                paris.append({
+                    'type': 'TRIO',
+                    'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero'], top_chevaux[2]['numero']],
                     'mise': 5,
-                    'cote_estimee': top_5[0]['cote'] if len(excellent) > 0 else top_5[0]['cote'] / 3,
-                    'roi_attendu': top_5[0]['cote'] * 0.7 if len(excellent) > 0 else (top_5[0]['cote'] / 3) * 0.8,
-                    'justification': f"Unique pari sur n°{top_5[0]['numero']}"
-                }
-            ]
+                    'gain_estime': round(sum(c.get('cote', 2.0) for c in top_chevaux[:3]) * 3, 2)
+                })
         
-        roi_total = sum(p['roi_attendu'] for p in paris)
-        logger.info(f"✅ {len(paris)} paris générés (ROI total attendu: {roi_total:.2f}€)")
+        if budget >= 20:
+            # Quarté
+            if len(top_chevaux) >= 4:
+                paris.append({
+                    'type': 'QUARTE',
+                    'chevaux': [top_chevaux[0]['numero'], top_chevaux[1]['numero'], 
+                               top_chevaux[2]['numero'], top_chevaux[3]['numero']],
+                    'mise': 5,
+                    'gain_estime': round(sum(c.get('cote', 2.0) for c in top_chevaux[:4]) * 5, 2)
+                })
+        
+        # Calculer ROI estimé
+        total_mise = sum(p['mise'] for p in paris)
+        total_gain = sum(p['gain_estime'] for p in paris)
+        roi = round((total_gain - total_mise) / total_mise * 100, 2) if total_mise > 0 else 0
+        
+        logger.info(f"✅ {len(paris)} paris générés, ROI estimé: {roi}%")
         
         return paris
     
     except Exception as e:
-        logger.error(f"❌ Erreur génération paris: {e}")
+        logger.error(f"❌ Erreur generer_paris: {e}")
         return []
 
 
-# Suite du fichier dans la partie 2...
-# Suite de app_v8.2_POSTGRESQL.py (partie 2/2)
-# À fusionner avec partie 1
-
 # ============================================================================
-# GEMINI AVEC CACHE ET GESTION QUOTA
+# GEMINI IA
 # ============================================================================
 
-@retry_on_failure(max_attempts=2, delay=5)
-def call_gemini(prompt: str) -> str:
+def analyser_avec_gemini(course_data: Dict, top_chevaux: List[Dict]) -> str:
     """
-    Appelle Gemini avec cache DB et gestion quota améliorée.
+    Analyse course avec Gemini AI.
+    
+    Args:
+        course_data: Données de la course
+        top_chevaux: Top 5 chevaux
+        
+    Returns:
+        Analyse textuelle ou message d'erreur
     """
+    if not GEMINI_API_KEY:
+        logger.warning("⚠️ GEMINI_API_KEY non configurée")
+        return "Analyse IA non disponible (clé API manquante)"
+    
     try:
-        if not GEMINI_API_KEY:
-            logger.warning("⚠️ GEMINI_API_KEY non configurée")
-            return "Analyse IA indisponible (clé API manquante). Les recommandations sont basées sur l'algorithme de scoring (fiabilité excellente)."
+        # Cache key
+        cache_key = f"{course_data['date']}_R{course_data['reunion']}_C{course_data['course']}"
         
-        # Vérifier cache DB pour IA
-        cache_key = f"gemini_{hash(prompt)}"
-        cached_response = get_from_cache_db(cache_key)
-        if cached_response and isinstance(cached_response, dict) and 'text' in cached_response:
-            logger.info("✅ Analyse IA depuis cache")
-            return cached_response['text']
+        # Vérifier cache
+        if cache_key in cache_gemini:
+            cached = cache_gemini[cache_key]
+            if cached.get('expires_at', datetime.now()) > datetime.now():
+                logger.info(f"📦 Cache Gemini hit: {cache_key}")
+                return cached['analyse']
         
-        import google.generativeai as genai
+        # Préparer prompt
+        top_5_text = "\n".join([
+            f"{i+1}. #{c['numero']} {c['nom']} - Score: {c['score']}/100, "
+            f"Cote: {c['cote']}, Driver: {c['driver']}"
+            for i, c in enumerate(top_chevaux[:5])
+        ])
         
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        prompt = f"""Analyse cette course hippique du {course_data['date']} :
+
+Hippodrome: {course_data['hippodrome']}
+Distance: {course_data['distance']}m
+{course_data['nb_partants']} partants
+
+TOP 5 CHEVAUX (selon notre algorithme) :
+{top_5_text}
+
+Donne une analyse COURTE (3-4 phrases max) avec :
+1. Le favori logique
+2. Un outsider intéressant
+3. Un conseil de pari
+
+Reste concis et pratique."""
         
-        response = model.generate_content(prompt)
-        result = response.text
+        # Appeler Gemini
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
         
-        # Sauvegarder dans cache DB (TTL 1h)
-        set_cache_db(cache_key, {'text': result}, ttl=3600)
+        headers = {'Content-Type': 'application/json'}
         
-        return result
+        payload = {
+            'contents': [{
+                'parts': [{'text': prompt}]
+            }]
+        }
+        
+        response = requests.post(
+            f"{url}?key={GEMINI_API_KEY}",
+            headers=headers,
+            json=payload,
+            timeout=config.REQUEST_TIMEOUT
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            # Extraire texte
+            candidates = result.get('candidates', [])
+            if candidates:
+                content = candidates[0].get('content', {})
+                parts = content.get('parts', [])
+                if parts:
+                    analyse = parts[0].get('text', '')
+                    
+                    # Mettre en cache
+                    cache_gemini[cache_key] = {
+                        'analyse': analyse,
+                        'expires_at': datetime.now() + timedelta(seconds=config.CACHE_TTL_GEMINI)
+                    }
+                    
+                    logger.info(f"✅ Analyse Gemini générée: {len(analyse)} caractères")
+                    return analyse
+        
+        # Erreur API
+        logger.warning(f"⚠️ Gemini API status {response.status_code}")
+        return "Analyse IA temporairement indisponible"
     
     except Exception as e:
-        error_msg = str(e)
         logger.error(f"❌ Erreur Gemini: {e}")
-        
-        # Gestion spécifique du quota
-        if "429" in error_msg or "quota" in error_msg.lower():
-            return "Analyse IA temporairement indisponible (quota dépassé). Les paris recommandés sont basés sur l'algorithme de scoring (scores, cotes, musique, expérience). Réessayez dans quelques minutes."
-        
-        # Gestion erreur API
-        if "API" in error_msg or "key" in error_msg.lower():
-            return "Analyse IA indisponible (erreur d'authentification). Les recommandations sont fiables et basées sur l'algorithme de scoring uniquement."
-        
-        return "Analyse IA temporairement indisponible. Les recommandations de paris sont basées sur l'algorithme de scoring (fiabilité excellente)."
+        return "Analyse IA non disponible"
 
 
 # ============================================================================
-# SAUVEGARDE EN BASE DE DONNÉES
-# ============================================================================
-
-def save_analyse_to_db(race_data: Dict, paris_recommandes: List[Dict], budget: int, roi_attendu: float, analyse_ia: str, processing_time: float) -> Optional[int]:
-    """
-    Sauvegarde une analyse en base de données.
-    Retourne l'ID de l'analyse ou None si erreur.
-    """
-    if not db_initialized:
-        logger.warning("⚠️ DB non initialisée, analyse non sauvegardée")
-        return None
-    
-    try:
-        with get_db() as db:
-            # Créer l'analyse
-            analyse = Analyse(
-                date_course=race_data['date'],
-                reunion=race_data['reunion'],
-                course=race_data['course'],
-                hippodrome=race_data['hippodrome'],
-                discipline=race_data['discipline'],
-                distance=race_data['distance'],
-                nb_partants=race_data['nb_partants'],
-                conditions=race_data.get('conditions'),
-                monte=race_data.get('monte'),
-                top_5=race_data['partants'][:5],
-                paris_recommandes=paris_recommandes,
-                budget=budget,
-                roi_attendu=roi_attendu,
-                analyse_ia=analyse_ia,
-                processing_time=processing_time,
-                version='8.2'
-            )
-            
-            # Check si analyse existe déjà (même course)
-            existing = db.query(Analyse).filter(
-                Analyse.date_course == race_data['date'],
-                Analyse.reunion == race_data['reunion'],
-                Analyse.course == race_data['course']
-            ).first()
-            
-            if existing:
-                # Update existante
-                existing.top_5 = analyse.top_5
-                existing.paris_recommandes = analyse.paris_recommandes
-                existing.budget = analyse.budget
-                existing.roi_attendu = analyse.roi_attendu
-                existing.analyse_ia = analyse.analyse_ia
-                existing.processing_time = analyse.processing_time
-                logger.info(f"✅ Analyse mise à jour (ID: {existing.id})")
-                return existing.id
-            else:
-                # Nouvelle analyse
-                db.add(analyse)
-                db.flush()  # Pour obtenir l'ID
-                logger.info(f"✅ Analyse sauvegardée (ID: {analyse.id})")
-                return analyse.id
-    
-    except Exception as e:
-        logger.error(f"❌ Erreur sauvegarde DB: {e}")
-        return None
-
-
-# ============================================================================
-# ENDPOINTS API
+# ROUTES API
 # ============================================================================
 
 @app.route('/')
-def home():
-    """Page d'accueil avec documentation."""
+def index():
+    """Page d'accueil."""
     return jsonify({
-        "name": "Trot System v8.2",
-        "version": "8.2.0-postgresql",
-        "description": "API d'analyse hippique avec PostgreSQL",
+        "name": "Trot System v8.3 FINAL",
+        "version": "8.3",
         "status": "operational",
-        "database": "connected" if db_initialized else "not_configured",
-        "features": [
-            "PostgreSQL persistance",
-            "Cache DB intelligent",
-            "Statistiques avancées",
-            "Export CSV",
-            "Dashboard admin",
-            "Pagination",
-            "Filtres multiples"
-        ],
         "endpoints": {
-            "/": "GET - Cette page",
-            "/health": "GET - Health check détaillé",
-            "/race": "GET ?date=DDMMYYYY&r=1&c=4&budget=20 - Analyse course",
-            "/history": "GET ?page=1&per_page=50&hippodrome=X - Historique avec filtres",
-            "/stats": "GET - Statistiques globales",
-            "/stats/hippodrome": "GET - Stats par hippodrome",
-            "/export/csv": "GET ?start_date=X&end_date=Y - Export CSV",
-            "/admin/stats": "GET - Dashboard admin",
-            "/admin/cache/stats": "GET - Métriques cache",
-            "/admin/cache/clean": "POST - Nettoyer cache expiré"
-        }
+            "health": "/health",
+            "race": "/race?date=DDMMYYYY&r=1-9&c=1-16&budget=5|10|15|20",
+            "stats": "/stats" if HAS_DATABASE else None
+        },
+        "features": [
+            "Scraping PMU",
+            "Scoring 7 facteurs",
+            "Gemini IA",
+            "Paris optimisés",
+            "PostgreSQL" if HAS_DATABASE else "Sans DB"
+        ]
     })
 
 
 @app.route('/health')
 def health():
-    """Health check détaillé avec tests."""
-    try:
-        health_status = {
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "version": "8.2.0",
-            "components": {
-                "api": "ok",
-                "gemini_configured": "yes" if GEMINI_API_KEY else "no",
-            },
-            "config": {
-                "max_retries": MAX_RETRIES,
-                "timeout": TIMEOUT,
-                "cache_ttl": CACHE_TTL
-            },
-            "metrics": {
-                "request_count": request_count,
-                "error_count": error_count,
-                "cache_hits": cache_hits,
-                "cache_misses": cache_misses,
-                "cache_hit_rate": f"{(cache_hits / (cache_hits + cache_misses) * 100):.1f}%" if (cache_hits + cache_misses) > 0 else "0%"
-            }
+    """Health check."""
+    status = {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "components": {
+            "api": "ok",
+            "gemini_configured": "yes" if GEMINI_API_KEY else "no",
+            "database": "connected" if HAS_DATABASE and test_connection() else "not configured"
+        },
+        "cache": {
+            "courses": len(cache_courses),
+            "gemini": len(cache_gemini)
         }
-        
-        # Test database
-        if db_initialized:
-            db_ok = test_connection()
-            health_status["components"]["database"] = "connected" if db_ok else "error"
-            
-            if db_ok:
-                stats = get_db_stats()
-                health_status["database_stats"] = stats
-        else:
-            health_status["components"]["database"] = "not_configured"
-        
-        # Test Gemini
-        if GEMINI_API_KEY:
-            try:
-                import google.generativeai as genai
-                genai.configure(api_key=GEMINI_API_KEY)
-                health_status["components"]["gemini"] = "ok"
-            except Exception as e:
-                health_status["components"]["gemini"] = f"error: {str(e)[:50]}"
-        
-        return jsonify(health_status), 200
+    }
     
-    except Exception as e:
-        logger.error(f"Health check error: {e}")
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.now().isoformat()
-        }), 503
+    return jsonify(status)
 
 
-@app.route('/race', methods=['GET'])
-@track_request
-def analyze_race():
+@app.route('/race')
+def analyser_course():
     """
-    Analyse une course avec sauvegarde PostgreSQL.
-    """
-    start_time = time.time()
+    Analyse une course hippique.
     
+    Query params:
+        - date: DDMMYYYY
+        - r: Numéro réunion (1-9)
+        - c: Numéro course (1-16)
+        - budget: Budget (5, 10, 15, 20) - défaut 20
+    """
     try:
-        # Extraction paramètres
+        # Récupérer paramètres
         date_str = request.args.get('date', '').strip()
-        reunion = request.args.get('r', type=int)
-        course = request.args.get('c', type=int)
-        budget = request.args.get('budget', default=20, type=int)
+        reunion_str = request.args.get('r', '').strip()
+        course_str = request.args.get('c', '').strip()
+        budget_str = request.args.get('budget', '20').strip()
         
-        # Validation paramètres
-        error_msg = validate_params(date_str, reunion, course, budget)
-        if error_msg:
+        # Convertir
+        try:
+            reunion = int(reunion_str)
+            course = int(course_str)
+            budget = int(budget_str)
+        except ValueError:
             return jsonify({
-                "error": "Paramètres invalides",
-                "details": error_msg,
-                "usage": "/race?date=20122025&r=1&c=4&budget=20"
+                "success": False,
+                "error": "Paramètres invalides. Format: date=DDMMYYYY&r=1&c=1&budget=20"
             }), 400
         
-        logger.info(f"📊 Analyse course: {date_str} R{reunion}C{course} (Budget: {budget}€)")
-        
-        # PHASE 1: Scraping
-        logger.info("1️⃣ Scraping PMU...")
-        race_data = scrape_pmu_race(date_str, reunion, course)
-        
-        if not race_data:
+        # Valider
+        is_valid, error_msg = validate_params(date_str, reunion, course, budget)
+        if not is_valid:
             return jsonify({
-                "error": "Course introuvable",
-                "details": "L'API PMU n'a pas retourné de données"
+                "success": False,
+                "error": error_msg
+            }), 400
+        
+        logger.info(f"🏁 Analyse demandée: {date_str} R{reunion}C{course} Budget: {budget}€")
+        
+        # Nettoyer cache
+        clean_cache()
+        
+        # Scraper PMU
+        data = scrape_pmu_with_retry(date_str, reunion, course)
+        
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "Course introuvable. Vérifiez la date, réunion et numéro de course."
             }), 404
         
-        # Vérifier partants
-        if race_data['nb_partants'] == 0:
+        # Parser données
+        course_data = parse_course_data(data)
+        
+        if not course_data:
             return jsonify({
-                "error": "Course sans partants",
-                "details": f"La course {date_str} R{reunion}C{course} n'a pas de partants déclarés",
-                "hippodrome": race_data['hippodrome']
-            }), 404
+                "success": False,
+                "error": "Impossible de parser les données de la course."
+            }), 500
         
-        # PHASE 2: Scoring
-        logger.info("2️⃣ Scoring chevaux...")
-        race_data = score_horses(race_data)
+        # Scorer chevaux
+        partants_scores = scorer_tous_partants(course_data)
         
-        # PHASE 3: Génération paris
-        logger.info("3️⃣ Génération paris...")
-        paris_recommandes = generate_bets(race_data, budget)
+        if not partants_scores:
+            return jsonify({
+                "success": False,
+                "error": "Impossible de calculer les scores."
+            }), 500
         
-        # PHASE 4: Analyse IA
-        logger.info("4️⃣ Analyse IA...")
-        top_5 = race_data['partants'][:5]
+        # Top 5
+        top_5 = partants_scores[:5]
         
-        if len(top_5) > 0:
-            prompt = f"""Tu es un expert en courses hippiques. Analyse cette course de trot:
-
-COURSE:
-- Hippodrome: {race_data['hippodrome']}
-- Distance: {race_data['distance']}m
-- Nombre de partants: {race_data['nb_partants']}
-- Conditions: {race_data.get('conditions', 'Non spécifiées')}
-
-TOP {len(top_5)} CHEVAUX (score sur 100):
-{json.dumps([{
-    'numero': p['numero'],
-    'nom': p['nom'],
-    'score': p['score'],
-    'cote': p['cote'],
-    'musique': p['musique'][:10] if p['musique'] else '',
-    'driver': p['driver']
-} for p in top_5], indent=2, ensure_ascii=False)}
-
-Donne une analyse concise (4-5 lignes max) avec:
-1. Ton pronostic principal
-2. Les chevaux à surveiller
-3. Les risques à considérer"""
-            
-            analyse_ia = call_gemini(prompt)
-        else:
-            analyse_ia = "Analyse IA indisponible (données insuffisantes)"
+        # Générer paris
+        paris = generer_paris(top_5, budget)
         
-        # Durée traitement
-        duration = time.time() - start_time
+        # Analyse Gemini
+        analyse_ia = analyser_avec_gemini(course_data, top_5)
         
-        # Calculer ROI total
-        roi_total = round(sum(p.get('roi_attendu', 0) for p in paris_recommandes), 2)
+        # Sauvegarder en DB si disponible
+        if HAS_DATABASE:
+            try:
+                with get_db() as db:
+                    analyse = Analyse(
+                        date_course=date_str,
+                        reunion=reunion,
+                        course=course,
+                        hippodrome=course_data['hippodrome'],
+                        discipline=course_data['discipline'],
+                        distance=course_data['distance'],
+                        nb_partants=course_data['nb_partants'],
+                        top_5=[{
+                            'numero': c['numero'],
+                            'nom': c['nom'],
+                            'score': c['score'],
+                            'cote': c['cote']
+                        } for c in top_5],
+                        paris_recommandes=paris,
+                        budget=budget,
+                        roi_attendu=sum(p['gain_estime'] for p in paris) - budget,
+                        analyse_ia=analyse_ia,
+                        version='8.3'
+                    )
+                    db.add(analyse)
+                    db.commit()
+                    logger.info("✅ Analyse sauvegardée en DB")
+            except Exception as e:
+                logger.error(f"⚠️ Erreur sauvegarde DB: {e}")
         
-        # PHASE 5: Sauvegarde en DB
-        logger.info("5️⃣ Sauvegarde en base de données...")
-        analyse_id = save_analyse_to_db(
-            race_data, 
-            paris_recommandes, 
-            budget, 
-            roi_total, 
-            analyse_ia, 
-            duration
-        )
-        
-        # Résultat final
-        result = {
+        # Réponse
+        response = {
             "success": True,
-            "analyse_id": analyse_id,
-            "date": date_str,
-            "reunion": reunion,
-            "course": course,
-            "hippodrome": race_data['hippodrome'],
-            "discipline": race_data['discipline'],
-            "distance": race_data['distance'],
-            "conditions": race_data.get('conditions', ''),
-            "nb_partants": race_data['nb_partants'],
-            "top_5_chevaux": [
-                {
-                    'numero': p['numero'],
-                    'nom': p['nom'],
-                    'score': p['score'],
-                    'cote': p['cote'],
-                    'driver': p['driver'],
-                    'musique': p['musique'][:15] if p['musique'] else '',
-                    'gains': p.get('gains', 0),
-                    'nb_victoires': p.get('nb_victoires', 0)
-                }
-                for p in top_5
-            ],
-            "paris_recommandes": paris_recommandes,
+            "course": {
+                "date": course_data['date'],
+                "reunion": course_data['reunion'],
+                "course": course_data['course'],
+                "hippodrome": course_data['hippodrome'],
+                "discipline": course_data['discipline'],
+                "distance": course_data['distance'],
+                "nb_partants": course_data['nb_partants']
+            },
+            "top_5_chevaux": [{
+                "position": i + 1,
+                "numero": c['numero'],
+                "nom": c['nom'],
+                "score": c['score'],
+                "cote": c['cote'],
+                "driver": c['driver'],
+                "musique": c['musique']
+            } for i, c in enumerate(top_5)],
+            "paris_recommandes": paris,
             "budget_total": budget,
-            "roi_total_attendu": roi_total,
+            "total_mise": sum(p['mise'] for p in paris),
+            "gain_estime_total": sum(p['gain_estime'] for p in paris),
+            "roi_estime": round((sum(p['gain_estime'] for p in paris) - sum(p['mise'] for p in paris)) / sum(p['mise'] for p in paris) * 100, 2) if paris else 0,
             "analyse_ia": analyse_ia,
-            "metadata": {
-                "timestamp": datetime.now().isoformat(),
-                "processing_time": round(duration, 2),
-                "version": "8.2.0",
-                "saved_to_db": analyse_id is not None
-            }
+            "timestamp": datetime.now().isoformat()
         }
         
-        logger.info(f"✅ Analyse terminée en {duration:.2f}s (ID: {analyse_id})")
+        logger.info(f"✅ Analyse terminée: Top={top_5[0]['numero']} Score={top_5[0]['score']}")
         
-        return jsonify(result), 200
+        return jsonify(response)
     
     except Exception as e:
-        logger.error(f"❌ Erreur analyse: {e}", exc_info=True)
+        logger.error(f"❌ Erreur /race: {e}", exc_info=True)
         return jsonify({
-            "error": "Erreur lors de l'analyse",
-            "message": str(e),
-            "type": type(e).__name__,
-            "timestamp": datetime.now().isoformat()
+            "success": False,
+            "error": f"Erreur serveur: {str(e)}"
         }), 500
 
 
-@app.route('/history')
-def get_history():
-    """
-    Retourne l'historique avec pagination et filtres.
-    Paramètres: page, per_page, hippodrome, date_start, date_end
-    """
-    if not db_initialized:
-        return jsonify({
-            "error": "Base de données non disponible",
-            "message": "Historique non accessible en mode dégradé"
-        }), 503
+# Routes Database (si disponible)
+if HAS_DATABASE:
     
-    try:
-        # Paramètres pagination
-        page = request.args.get('page', 1, type=int)
-        per_page = request.args.get('per_page', 50, type=int)
-        per_page = min(per_page, 100)  # Max 100 par page
-        
-        # Paramètres filtres
-        hippodrome = request.args.get('hippodrome')
-        date_start = request.args.get('date_start')
-        date_end = request.args.get('date_end')
-        
-        with get_db() as db:
-            # Query de base
-            query = db.query(Analyse)
+    @app.route('/stats')
+    def get_stats():
+        """Statistiques système."""
+        try:
+            stats = get_db_stats()
+            return jsonify({
+                "success": True,
+                "statistics": stats
+            })
+        except Exception as e:
+            logger.error(f"❌ Erreur /stats: {e}")
+            return jsonify({
+                "success": False,
+                "error": str(e)
+            }), 500
+    
+    @app.route('/analyses')
+    def get_analyses():
+        """Liste des analyses."""
+        try:
+            page = int(request.args.get('page', 1))
+            per_page = int(request.args.get('per_page', 50))
             
-            # Appliquer filtres
-            if hippodrome:
-                query = query.filter(Analyse.hippodrome.ilike(f'%{hippodrome}%'))
-            if date_start:
-                query = query.filter(Analyse.date_course >= date_start)
-            if date_end:
-                query = query.filter(Analyse.date_course <= date_end)
-            
-            # Count total
-            total = query.count()
-            
-            # Pagination
-            analyses = query.order_by(Analyse.created_at.desc())\
-                .limit(per_page)\
-                .offset((page - 1) * per_page)\
-                .all()
-            
-            # Statistiques
-            stats = {}
-            if total > 0:
-                stats_query = db.query(
-                    func.avg(Analyse.roi_attendu).label('roi_moyen'),
-                    func.sum(Analyse.budget).label('budget_total'),
-                    func.count(func.distinct(Analyse.hippodrome)).label('nb_hippodromes')
-                )
+            with get_db() as db:
+                query = db.query(Analyse).order_by(Analyse.created_at.desc())
+                total = query.count()
+                analyses = query.offset((page - 1) * per_page).limit(per_page).all()
                 
-                # Appliquer mêmes filtres pour stats
-                if hippodrome:
-                    stats_query = stats_query.filter(Analyse.hippodrome.ilike(f'%{hippodrome}%'))
-                if date_start:
-                    stats_query = stats_query.filter(Analyse.date_course >= date_start)
-                if date_end:
-                    stats_query = stats_query.filter(Analyse.date_course <= date_end)
-                
-                stats_result = stats_query.first()
-                stats = {
-                    "total_analyses": total,
-                    "roi_moyen": float(stats_result.roi_moyen) if stats_result.roi_moyen else 0,
-                    "budget_total": int(stats_result.budget_total) if stats_result.budget_total else 0,
-                    "nb_hippodromes": int(stats_result.nb_hippodromes) if stats_result.nb_hippodromes else 0
-                }
-            
-            return jsonify({
-                "status": "success",
-                "page": page,
-                "per_page": per_page,
-                "total": total,
-                "pages": (total + per_page - 1) // per_page,
-                "filters": {
-                    "hippodrome": hippodrome,
-                    "date_start": date_start,
-                    "date_end": date_end
-                },
-                "statistics": stats,
-                "history": [a.to_dict() for a in analyses]
-            }), 200
-    
-    except Exception as e:
-        logger.error(f"Erreur historique: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/stats')
-def get_stats():
-    """Statistiques globales du système."""
-    if not db_initialized:
-        return jsonify({
-            "error": "Base de données non disponible"
-        }), 503
-    
-    try:
-        with get_db() as db:
-            # Statistiques globales
-            global_stats = db.query(
-                func.count(Analyse.id).label('total'),
-                func.avg(Analyse.roi_attendu).label('roi_moyen'),
-                func.sum(Analyse.budget).label('budget_total'),
-                func.avg(Analyse.processing_time).label('avg_time'),
-                func.count(func.distinct(Analyse.hippodrome)).label('nb_hippodromes'),
-                func.count(func.distinct(Analyse.date_course)).label('nb_dates')
-            ).first()
-            
-            # Top 5 hippodromes
-            top_hippodromes = db.query(
-                Analyse.hippodrome,
-                func.count(Analyse.id).label('count'),
-                func.avg(Analyse.roi_attendu).label('roi_moyen')
-            ).group_by(Analyse.hippodrome)\
-             .order_by(func.count(Analyse.id).desc())\
-             .limit(5)\
-             .all()
-            
-            return jsonify({
-                "status": "success",
-                "global": {
-                    "total_analyses": int(global_stats.total) if global_stats.total else 0,
-                    "roi_moyen": float(global_stats.roi_moyen) if global_stats.roi_moyen else 0,
-                    "budget_total": int(global_stats.budget_total) if global_stats.budget_total else 0,
-                    "avg_processing_time": float(global_stats.avg_time) if global_stats.avg_time else 0,
-                    "nb_hippodromes": int(global_stats.nb_hippodromes) if global_stats.nb_hippodromes else 0,
-                    "nb_dates": int(global_stats.nb_dates) if global_stats.nb_dates else 0
-                },
-                "top_hippodromes": [
-                    {
-                        "hippodrome": h.hippodrome,
-                        "nb_analyses": int(h.count),
-                        "roi_moyen": float(h.roi_moyen) if h.roi_moyen else 0
-                    }
-                    for h in top_hippodromes
-                ]
-            }), 200
-    
-    except Exception as e:
-        logger.error(f"Erreur stats: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/stats/hippodrome')
-def get_stats_hippodrome():
-    """Statistiques détaillées par hippodrome."""
-    if not db_initialized:
-        return jsonify({"error": "Base de données non disponible"}), 503
-    
-    try:
-        with get_db() as db:
-            stats_by_hippodrome = db.query(
-                Analyse.hippodrome,
-                func.count(Analyse.id).label('nb_analyses'),
-                func.avg(Analyse.roi_attendu).label('roi_moyen'),
-                func.avg(Analyse.nb_partants).label('avg_partants'),
-                func.avg(Analyse.distance).label('avg_distance')
-            ).group_by(Analyse.hippodrome)\
-             .order_by(func.count(Analyse.id).desc())\
-             .all()
-            
-            return jsonify({
-                "status": "success",
-                "count": len(stats_by_hippodrome),
-                "hippodromes": [
-                    {
-                        "hippodrome": s.hippodrome,
-                        "nb_analyses": int(s.nb_analyses),
-                        "roi_moyen": float(s.roi_moyen) if s.roi_moyen else 0,
-                        "avg_partants": float(s.avg_partants) if s.avg_partants else 0,
-                        "avg_distance": float(s.avg_distance) if s.avg_distance else 0
-                    }
-                    for s in stats_by_hippodrome
-                ]
-            }), 200
-    
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/export/csv')
-def export_csv():
-    """Export des analyses en CSV."""
-    if not db_initialized:
-        return jsonify({"error": "Base de données non disponible"}), 503
-    
-    try:
-        # Paramètres filtres
-        date_start = request.args.get('date_start')
-        date_end = request.args.get('date_end')
-        hippodrome = request.args.get('hippodrome')
+                return jsonify({
+                    "success": True,
+                    "total": total,
+                    "page": page,
+                    "per_page": per_page,
+                    "analyses": [{
+                        "id": a.id,
+                        "date_course": a.date_course,
+                        "reunion": a.reunion,
+                        "course": a.course,
+                        "hippodrome": a.hippodrome,
+                        "top_5": a.top_5,
+                        "roi_attendu": a.roi_attendu,
+                        "created_at": a.created_at.isoformat()
+                    } for a in analyses]
+                })
         
-        with get_db() as db:
-            query = db.query(Analyse)
-            
-            if date_start:
-                query = query.filter(Analyse.date_course >= date_start)
-            if date_end:
-                query = query.filter(Analyse.date_course <= date_end)
-            if hippodrome:
-                query = query.filter(Analyse.hippodrome.ilike(f'%{hippodrome}%'))
-            
-            analyses = query.order_by(Analyse.created_at.desc()).limit(1000).all()
-            
-            # Créer CSV
-            output = io.StringIO()
-            writer = csv.writer(output)
-            
-            # Header
-            writer.writerow([
-                'ID', 'Date', 'Réunion', 'Course', 'Hippodrome', 
-                'Distance', 'Nb Partants', 'Budget', 'ROI Attendu', 
-                'Processing Time', 'Created At'
-            ])
-            
-            # Données
-            for a in analyses:
-                writer.writerow([
-                    a.id, a.date_course, a.reunion, a.course, a.hippodrome,
-                    a.distance, a.nb_partants, a.budget, a.roi_attendu,
-                    a.processing_time, a.created_at
-                ])
-            
-            # Retourner CSV
-            output.seek(0)
-            return Response(
-                output.getvalue(),
-                mimetype='text/csv',
-                headers={
-                    'Content-Disposition': f'attachment; filename=trot_system_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
-                }
-            )
-    
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/admin/stats')
-def admin_stats():
-    """Dashboard admin avec métriques système."""
-    if not db_initialized:
-        return jsonify({"error": "Base de données non disponible"}), 503
-    
-    try:
-        db_stats = get_db_stats()
-        
-        # Analyses récentes (24h)
-        with get_db() as db:
-            last_24h = db.query(Analyse).filter(
-                Analyse.created_at >= datetime.now() - timedelta(hours=24)
-            ).count()
-            
-            last_7d = db.query(Analyse).filter(
-                Analyse.created_at >= datetime.now() - timedelta(days=7)
-            ).count()
-        
-        return jsonify({
-            "status": "success",
-            "system": {
-                "version": "8.2.0",
-                "database": db_stats,
-                "uptime": "N/A",
-                "cache_hit_rate": f"{(cache_hits / (cache_hits + cache_misses) * 100):.1f}%" if (cache_hits + cache_misses) > 0 else "0%"
-            },
-            "analyses": {
-                "last_24h": last_24h,
-                "last_7d": last_7d
-            },
-            "performance": {
-                "request_count": request_count,
-                "error_count": error_count,
-                "error_rate": f"{(error_count / request_count * 100):.1f}%" if request_count > 0 else "0%"
-            }
-        }), 200
-    
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route('/admin/cache/stats')
-def cache_stats():
-    """Statistiques détaillées du cache."""
-    if not db_initialized:
-        return jsonify({"error": "Base de données non disponible"}), 503
-    
-    try:
-        with get_db() as db:
-            cache_entries = db.query(CoursesCache).all()
-            
-            total_entries = len(cache_entries)
-            total_hits = sum(c.hits for c in cache_entries)
-            total_size = sum(c.size_bytes or 0 for c in cache_entries)
-            
-            # Top entries
-            top_entries = sorted(cache_entries, key=lambda x: x.hits, reverse=True)[:10]
-            
+        except Exception as e:
+            logger.error(f"❌ Erreur /analyses: {e}")
             return jsonify({
-                "status": "success",
-                "cache": {
-                    "total_entries": total_entries,
-                    "total_hits": total_hits,
-                    "total_size_bytes": total_size,
-                    "total_size_mb": round(total_size / 1024 / 1024, 2),
-                    "avg_hits_per_entry": round(total_hits / total_entries, 2) if total_entries > 0 else 0
-                },
-                "metrics": {
-                    "cache_hits": cache_hits,
-                    "cache_misses": cache_misses,
-                    "hit_rate": f"{(cache_hits / (cache_hits + cache_misses) * 100):.1f}%" if (cache_hits + cache_misses) > 0 else "0%"
-                },
-                "top_entries": [
-                    {
-                        "key": c.cache_key,
-                        "hits": c.hits,
-                        "size_bytes": c.size_bytes,
-                        "created_at": c.created_at.isoformat(),
-                        "expires_at": c.expires_at.isoformat()
-                    }
-                    for c in top_entries
-                ]
-            }), 200
-    
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+                "success": False,
+                "error": str(e)
+            }), 500
 
 
-@app.route('/admin/cache/clean', methods=['POST'])
-def clean_cache():
-    """Nettoie le cache expiré manuellement."""
-    if not db_initialized:
-        return jsonify({"error": "Base de données non disponible"}), 503
-    
+# ============================================================================
+# INITIALISATION
+# ============================================================================
+
+def init_app():
+    """Initialisation au démarrage (compatible Flask 3.0)."""
     try:
-        deleted = clean_expired_cache()
-        return jsonify({
-            "status": "success",
-            "deleted": deleted,
-            "message": f"{deleted} entrées cache expirées supprimées"
-        }), 200
+        logger.info("🚀 Initialisation Trot System v8.3")
+        
+        # Initialiser database si disponible
+        if HAS_DATABASE and DATABASE_URL:
+            success = init_database()
+            if success:
+                logger.info("✅ Database initialisée")
+                # Nettoyer cache expiré
+                clean_expired_cache()
+            else:
+                logger.warning("⚠️ Database non disponible")
+        else:
+            logger.warning("⚠️ Base de données non configurée - Mode dégradé")
+        
+        # Afficher config
+        logger.info(f"Gemini: {'✅ Configuré' if GEMINI_API_KEY else '❌ Non configuré'}")
+        logger.info(f"Database: {'✅ Activé' if HAS_DATABASE else '❌ Désactivé'}")
+        logger.info("✅ Application prête")
     
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"❌ Erreur initialisation: {e}")
+
+
+# Appeler initialisation au démarrage (Flask 3.0 compatible)
+with app.app_context():
+    init_app()
 
 
 # ============================================================================
-# GESTION ERREURS
+# POINT D'ENTRÉE
 # ============================================================================
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({
-        "status": "error",
-        "code": 404,
-        "message": "Endpoint introuvable",
-        "available_endpoints": [
-            "/", "/health", "/race", "/history", "/stats", 
-            "/export/csv", "/admin/stats"
-        ]
-    }), 404
-
-
-@app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"Erreur 500: {error}")
-    return jsonify({
-        "status": "error",
-        "code": 500,
-        "message": "Erreur interne du serveur"
-    }), 500
-
-
-# ============================================================================
-# DÉMARRAGE ET ARRÊT
-# ============================================================================
-
-@app.before_first_request
-def before_first_request():
-    """Actions avant la première requête."""
-    logger.info("🚀 Application démarrée")
-
-
-@app.teardown_appcontext
-def shutdown_session(exception=None):
-    """Nettoyage après chaque requête."""
-    if exception:
-        logger.error(f"Exception pendant requête: {exception}")
-
-
-def shutdown():
-    """Arrêt propre de l'application."""
-    logger.info("🛑 Arrêt de l'application...")
-    close_database()
-    logger.info("✅ Arrêt terminé")
-
 
 if __name__ == '__main__':
-    try:
-        port = int(os.environ.get('PORT', 5000))
-        logger.info(f"🚀 Démarrage Trot System v8.2 sur port {port}")
-        logger.info(f"📊 Configuration: retries={MAX_RETRIES}, timeout={TIMEOUT}s, cache_ttl={CACHE_TTL}s")
-        logger.info(f"🗄️ Database: {'✅ Connected' if db_initialized else '❌ Not configured'}")
-        
-        app.run(host='0.0.0.0', port=port, debug=False)
-    except KeyboardInterrupt:
-        shutdown()
-    except Exception as e:
-        logger.error(f"❌ Erreur fatale: {e}")
-        shutdown()
+    port = int(os.getenv('PORT', 5000))
+    debug = os.getenv('ENVIRONMENT', 'production') != 'production'
+    
+    logger.info(f"🚀 Démarrage sur port {port}")
+    
+    app.run(
+        host='0.0.0.0',
+        port=port,
+        debug=debug
+    )
