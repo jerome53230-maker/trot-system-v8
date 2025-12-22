@@ -153,6 +153,11 @@ def generate_bets(race_data, budget):
         paris = []
         top_5 = race_data['partants'][:5]
         
+        # Vérifier qu'il y a des partants
+        if len(top_5) == 0:
+            logger.warning("⚠️ Pas de partants, aucun pari généré")
+            return []
+        
         if budget >= 20:
             # Budget 20€: 3 paris
             paris = [
@@ -220,12 +225,12 @@ def generate_bets(race_data, budget):
 def call_gemini(prompt):
     """
     Appelle l'API Gemini.
-    Version simplifiée sans GeminiClient.
+    Version simplifiée sans GeminiClient avec gestion quota.
     """
     try:
         if not GEMINI_API_KEY:
             logger.warning("⚠️ GEMINI_API_KEY non configurée")
-            return "Analyse indisponible (clé API manquante)"
+            return "Analyse IA indisponible (clé API manquante). Le système fonctionne sans analyse IA."
         
         import google.generativeai as genai
         
@@ -237,8 +242,14 @@ def call_gemini(prompt):
         return response.text
     
     except Exception as e:
+        error_msg = str(e)
         logger.error(f"❌ Erreur Gemini: {e}")
-        return f"Erreur analyse IA: {str(e)}"
+        
+        # Gestion spécifique du quota dépassé
+        if "429" in error_msg or "quota" in error_msg.lower():
+            return "Analyse IA temporairement indisponible (quota API dépassé). Les recommandations de paris sont basées sur l'algorithme de scoring uniquement."
+        
+        return f"Analyse IA indisponible. Les recommandations sont basées sur l'algorithme de scoring."
 
 
 # ============================================================================
@@ -325,7 +336,21 @@ def analyze_race():
         
         if not race_data:
             return jsonify({
-                "error": "Course introuvable ou données indisponibles"
+                "error": "Course introuvable ou données indisponibles",
+                "details": "L'API PMU n'a pas retourné de données pour cette course"
+            }), 404
+        
+        # Vérifier qu'il y a des partants
+        if race_data['nb_partants'] == 0:
+            return jsonify({
+                "error": "Course sans partants",
+                "details": f"La course {date_str} R{reunion}C{course} n'a pas de partants déclarés",
+                "suggestions": [
+                    "Vérifiez que la date est correcte (format: DDMMYYYY)",
+                    "Vérifiez que la course existe sur PMU.fr",
+                    "Essayez une autre réunion ou course",
+                    "Les courses futures peuvent ne pas avoir de partants déclarés"
+                ]
             }), 404
         
         # PHASE 2: Scoring
@@ -339,15 +364,20 @@ def analyze_race():
         # PHASE 4: Analyse Gemini (optionnel)
         logger.info("4️⃣ Analyse IA...")
         top_5 = race_data['partants'][:5]
-        prompt = f"""Analyse cette course de trot:
+        
+        if len(top_5) > 0:
+            prompt = f"""Analyse cette course de trot:
 Hippodrome: {race_data['hippodrome']}
 Distance: {race_data['distance']}m
-Top 5 chevaux:
+Nombre de partants: {race_data['nb_partants']}
+Top {len(top_5)} chevaux:
 {json.dumps([{'numero': p['numero'], 'nom': p['nom'], 'score': p['score'], 'cote': p['cote']} for p in top_5], indent=2)}
 
 Donne une analyse courte (3-4 lignes) avec ton pronostic."""
-        
-        analyse_ia = call_gemini(prompt)
+            
+            analyse_ia = call_gemini(prompt)
+        else:
+            analyse_ia = "Analyse IA indisponible (pas assez de données)"
         
         # Résultat final
         result = {

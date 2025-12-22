@@ -1,24 +1,20 @@
-# Trot System v8.0 - Requirements
-# Python 3.11+
+# Trot System v8.1 - Requirements
+# Version améliorée avec corrections et optimisations
+# Python 3.11+ (compatible Python 3.13)
 
-# Web Framework
+# Framework Web
 Flask==3.0.0
 flask-cors==4.0.0
-
-# Requêtes HTTP
-requests==2.31.0
-
-# Base de données (optionnel mais recommandé)
-psycopg2-binary==2.9.9
-
-# IA Gemini
-google-generativeai==0.3.2
-
-# Monitoring (optionnel)
-prometheus-client==0.19.0
-
-# Serveur WSGI production
 gunicorn==21.2.0
 
-# Utilitaires
-python-dotenv==1.0.0
+# HTTP Requests (scraping PMU avec retry)
+requests==2.31.0
+
+# Google Generative AI (analyse IA avec gestion quota)
+google-generativeai==0.8.3
+
+# Optional mais recommandé pour production
+# python-dotenv==1.0.0  # Gestion variables d'environnement
+# redis==5.0.1  # Cache distribué (à activer plus tard)
+# psycopg2-binary==2.9.9  # PostgreSQL (à activer plus tard)
+# sentry-sdk[flask]==1.40.0  # Monitoring erreurs (à activer plus tard)
